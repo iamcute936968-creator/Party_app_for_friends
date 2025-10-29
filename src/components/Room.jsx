@@ -25,12 +25,15 @@ export default function Room(props) {
     messages,
     msgInput,
     setMsgInput,
-    sendMsg
+    sendMsg,
+    // WebRTC props
+    amSharing,
+    changeQuality,
+    currentQuality
   } = props;
 
   // Local state for controls
   const [isMuted, setIsMuted] = useState(false);
-  const [quality, setQuality] = useState('auto'); // 'low', 'medium', 'high', 'auto'
   const [showQualityMenu, setShowQualityMenu] = useState(false);
 
   const toggleMute = () => {
@@ -40,27 +43,11 @@ export default function Room(props) {
     }
   };
 
-  const changeQuality = (newQuality) => {
-    setQuality(newQuality);
-    setShowQualityMenu(false);
-    
-    // Apply quality settings to video element
-    if (vidRef.current && vidRef.current.srcObject) {
-      const tracks = vidRef.current.srcObject.getVideoTracks();
-      if (tracks.length > 0) {
-        const track = tracks[0];
-        const constraints = {
-          'low': { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 15 } },
-          'medium': { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24 } },
-          'high': { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
-          'auto': {} // Let browser decide
-        };
-        
-        track.applyConstraints(constraints[newQuality])
-          .then(() => console.log(`Quality changed to ${newQuality}`))
-          .catch(e => console.log('Quality change not supported:', e));
-      }
+  const handleQualityChange = (newQuality) => {
+    if (amSharing && changeQuality) {
+      changeQuality(newQuality);
     }
+    setShowQualityMenu(false);
   };
 
   const qualityLabels = {
@@ -72,13 +59,25 @@ export default function Room(props) {
 
   return (
     <div className="fixed inset-0 bg-gray-900 flex flex-col">
-      <div className="bg-gray-800 border-b border-gray-700 p-3">
+      {/* Header - Always visible */}
+      <div className="bg-gray-800 border-b border-gray-700 p-3 flex-shrink-0">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <Video className="w-6 h-6 text-purple-400" />
             <div className="min-w-0">
               <h1 className="text-base font-bold text-white truncate">{room?.roomName}</h1>
-              <p className="text-gray-400 text-xs truncate">{room?.id} {isHost && <span className="text-purple-400">(Host)</span>}</p>
+              <div className="flex items-center gap-2">
+                <p className="text-gray-400 text-xs truncate">
+                  {room?.id} {isHost && <span className="text-purple-400">(Host)</span>}
+                </p>
+                {/* Sharing indicator in header */}
+                {room?.isSharing && room?.shareHost && (
+                  <span className="flex items-center gap-1 text-green-400 text-xs font-semibold">
+                    <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></div>
+                    Screen Sharing
+                  </span>
+                )}
+              </div>
             </div>
           </div>
           <div className="flex gap-2">
@@ -91,11 +90,13 @@ export default function Room(props) {
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col overflow-hidden">
+      {/* Main Content Area - Flex container */}
+      <div className="flex-1 flex flex-col overflow-hidden min-h-0">
         
-        <div ref={containerRef} className="flex-1 bg-black relative">
+        {/* Video Container - Takes available space but constrained */}
+        <div ref={containerRef} className="flex-1 bg-black relative min-h-0">
           
-          {/* The YouTube player div (permanent, hidden) */}
+          {/* The YouTube player div */}
           <div 
             id="yt-player" 
             className="w-full h-full" 
@@ -112,13 +113,17 @@ export default function Room(props) {
             />
           )}
 
-          {/* Screen Share Video - ALWAYS RENDER (WebRTC uses this) */}
+          {/* Screen Share Video - Properly constrained */}
           <video 
             ref={vidRef} 
             autoPlay 
             playsInline 
-            className="w-full h-full object-contain" 
-            style={{ display: room?.isSharing ? 'block' : 'none' }}
+            className="w-full h-full object-contain bg-black" 
+            style={{ 
+              display: room?.isSharing ? 'block' : 'none',
+              maxWidth: '100%',
+              maxHeight: '100%'
+            }}
           />
 
           {/* No Video message */}
@@ -131,7 +136,7 @@ export default function Room(props) {
             </div>
           )}
 
-          {/* FIXED: Sharing indicator - Only show once at the top */}
+          {/* Sharing indicator - Single instance, fixed position */}
           {room?.isSharing && room?.shareHost && (
             <div className="absolute top-4 left-4 bg-red-600/90 backdrop-blur-sm text-white px-4 py-2 rounded-full flex items-center gap-2 z-20">
               <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
@@ -139,7 +144,7 @@ export default function Room(props) {
             </div>
           )}
 
-          {/* Video Controls (Mute & Quality) - Only show when sharing */}
+          {/* Video Controls - Only show when sharing */}
           {room?.isSharing && (
             <div className="absolute bottom-4 right-4 flex gap-2 z-20">
               {/* Mute/Unmute Button */}
@@ -151,36 +156,45 @@ export default function Room(props) {
                 {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
               </button>
 
-              {/* Quality Selector */}
-              <div className="relative">
-                <button 
-                  onClick={() => setShowQualityMenu(!showQualityMenu)}
-                  className="bg-black/70 hover:bg-black/90 text-white px-3 py-3 rounded-full backdrop-blur-sm transition-all flex items-center gap-2"
-                  title="Quality Settings"
-                >
-                  <Settings className="w-5 h-5" />
-                  <span className="text-xs font-semibold">{qualityLabels[quality]}</span>
-                </button>
+              {/* Quality Selector - Interactive for host, display-only for members */}
+              {amSharing ? (
+                // HOST: Interactive quality control
+                <div className="relative">
+                  <button 
+                    onClick={() => setShowQualityMenu(!showQualityMenu)}
+                    className="bg-black/70 hover:bg-black/90 text-white px-3 py-3 rounded-full backdrop-blur-sm transition-all flex items-center gap-2"
+                    title="Quality Settings"
+                  >
+                    <Settings className="w-5 h-5" />
+                    <span className="text-xs font-semibold">{qualityLabels[currentQuality || 'high']}</span>
+                  </button>
 
-                {/* Quality Menu */}
-                {showQualityMenu && (
-                  <div className="absolute bottom-full right-0 mb-2 bg-gray-800 rounded-lg shadow-lg border border-gray-700 overflow-hidden min-w-32">
-                    {['auto', 'high', 'medium', 'low'].map((q) => (
-                      <button
-                        key={q}
-                        onClick={() => changeQuality(q)}
-                        className={`w-full px-4 py-2 text-left text-sm transition-colors ${
-                          quality === q 
-                            ? 'bg-purple-600 text-white' 
-                            : 'text-gray-300 hover:bg-gray-700'
-                        }`}
-                      >
-                        {qualityLabels[q]}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+                  {/* Quality Menu */}
+                  {showQualityMenu && (
+                    <div className="absolute bottom-full right-0 mb-2 bg-gray-800 rounded-lg shadow-lg border border-gray-700 overflow-hidden min-w-32">
+                      {['high', 'medium', 'low'].map((q) => (
+                        <button
+                          key={q}
+                          onClick={() => handleQualityChange(q)}
+                          className={`w-full px-4 py-2 text-left text-sm transition-colors ${
+                            (currentQuality || 'high') === q 
+                              ? 'bg-purple-600 text-white' 
+                              : 'text-gray-300 hover:bg-gray-700'
+                          }`}
+                        >
+                          {qualityLabels[q]}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                // MEMBER: Display-only quality indicator
+                <div className="bg-black/70 text-white px-3 py-3 rounded-full backdrop-blur-sm flex items-center gap-2">
+                  <Settings className="w-5 h-5" />
+                  <span className="text-xs font-semibold">Auto</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -197,12 +211,13 @@ export default function Room(props) {
           )}
 
           {/* Fullscreen Toggle */}
-          <button onClick={toggleFs} className="absolute top-4 right-4 bg-black/60 hover:bg-black/80 text-white p-3 rounded-full" style={{ zIndex: 25 }}>
+          <button onClick={toggleFs} className="absolute top-4 right-4 bg-black/60 hover:bg-black/80 text-white p-3 rounded-full z-25">
             {isFs ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
           </button>
         </div>
 
-        <div className="bg-gray-800 p-3 border-t border-gray-700">
+        {/* Controls Bar - Always visible at bottom */}
+        <div className="bg-gray-800 p-3 border-t border-gray-700 flex-shrink-0">
           <div className="flex flex-col sm:flex-row gap-2 mb-3">
             <input 
               type="text" 
@@ -239,6 +254,7 @@ export default function Room(props) {
             </div>
           </div>
 
+          {/* Chat and Participants */}
           <div className="bg-gray-700/50 rounded-lg p-3">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">

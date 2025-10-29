@@ -32,6 +32,7 @@ const WatchPartyApp = () => {
   const [floatMsgs, setFloatMsgs] = useState([]);
   const [player, setPlayer] = useState(null);
   const [vidSrc, setVidSrc] = useState('youtube');
+  const [lastHostRoom, setLastHostRoom] = useState(null); // Store last hosted room
   
   // All refs
   const containerRef = useRef(null);
@@ -43,7 +44,7 @@ const WatchPartyApp = () => {
 
   // ✅ INTEGRATE WEBRTC HOOK HERE
   const webRTC = useWebRTC(db, roomId, username, isHost.current, room);
-  const { isSharing, amSharing, shareHost, startShare, stopShare, vidRef } = webRTC;
+  const { isSharing, amSharing, shareHost, startShare, stopShare, changeQuality, currentQuality, vidRef } = webRTC;
 
   // Options
   const avOpts = [
@@ -55,6 +56,19 @@ const WatchPartyApp = () => {
   const genId = () => Math.random().toString(36).substring(2, 8).toUpperCase();
   const getYt = (u) => { const r = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/; const m = u.match(r); return (m && m[2].length === 11) ? m[2] : null; };
   const getDrive = (u) => { const ps = [/\/file\/d\/([^/]+)/, /id=([^&]+)/, /\/d\/([^/]+)/]; for (const p of ps) { const m = u.match(p); if (m) return m[1]; } return null; };
+
+  // Load last hosted room from localStorage on mount
+  useEffect(() => {
+    const savedRoom = localStorage.getItem('lastHostedRoom');
+    if (savedRoom) {
+      try {
+        const roomData = JSON.parse(savedRoom);
+        setLastHostRoom(roomData);
+      } catch (e) {
+        console.log('Error loading saved room:', e);
+      }
+    }
+  }, []);
 
   // YouTube API setup
   useEffect(() => {
@@ -192,12 +206,55 @@ const WatchPartyApp = () => {
     };
     try {
       await set(roomRef_, rm);
+      
+      // Save to localStorage for rejoin
+      localStorage.setItem('lastHostedRoom', JSON.stringify({
+        roomId: id,
+        hostName: username,
+        createdAt: Date.now()
+      }));
+      
       setRoom(rm);
       setParticipants([username]);
       setRoomId(id);
       setView('room');
       isHost.current = true;
     } catch (e) { alert('Failed to create room'); }
+    setLoading(false);
+  };
+
+  const rejoinAsHost = async () => {
+    if (!lastHostRoom || !username.trim()) return alert('Enter your name');
+    setLoading(true);
+    const id = lastHostRoom.roomId;
+    const roomRef_ = ref(db, '/rooms/' + id);
+    
+    try {
+      const snapshot = await fbGet(roomRef_);
+      const rm = snapshot.val();
+      
+      if (rm && rm.host === lastHostRoom.hostName) {
+        // Room exists and you are the original host
+        await update(ref(db, '/rooms/' + id + '/participants'), { [username]: true });
+        await set(ref(db, '/rooms/' + id + '/messages'), [
+          ...(rm.messages || []), 
+          { type: 'system', text: username + ' (Host) rejoined', time: new Date().toLocaleTimeString(), timestamp: Date.now() }
+        ]);
+        
+        setRoom(rm);
+        setRoomId(id);
+        setView('room');
+        isHost.current = true;
+        if (rm.videoId) { setVideoId(rm.videoId); setVidSrc(rm.videoSource || 'youtube'); }
+      } else {
+        alert('Room not found or you are not the host');
+        // Clear invalid saved room
+        localStorage.removeItem('lastHostedRoom');
+        setLastHostRoom(null);
+      }
+    } catch (e) { 
+      alert('Failed to rejoin room'); 
+    }
     setLoading(false);
   };
 
@@ -325,7 +382,6 @@ const WatchPartyApp = () => {
     if (syncInt.current) clearInterval(syncInt.current);
     if (roomListener.current) roomListener.current();
     
-    // ✅ Use WebRTC stopShare
     await stopShare(true);
     
     setView('home');
@@ -353,6 +409,8 @@ const WatchPartyApp = () => {
         myAvatar={myAvatar}
         setMyAvatar={setMyAvatar}
         avOpts={avOpts}
+        lastHostRoom={lastHostRoom}
+        rejoinAsHost={rejoinAsHost}
       />
     );
   }
@@ -360,7 +418,7 @@ const WatchPartyApp = () => {
   return (
     <Room
       containerRef={containerRef}
-      vidRef={vidRef}  // ✅ Pass WebRTC vidRef
+      vidRef={vidRef}
       room={room}
       isHost={isHost.current}
       participants={participants}
@@ -375,13 +433,16 @@ const WatchPartyApp = () => {
       ytUrl={ytUrl}
       setYtUrl={setYtUrl}
       load={load}
-      startShare={startShare}  // ✅ Pass WebRTC startShare
-      stopShare={stopShare}    // ✅ Pass WebRTC stopShare
+      startShare={startShare}
+      stopShare={stopShare}
       togglePlay={togglePlay}
       messages={messages}
       msgInput={msgInput}
       setMsgInput={setMsgInput}
       sendMsg={sendMsg}
+      amSharing={amSharing}
+      changeQuality={changeQuality}
+      currentQuality={currentQuality}
     />
   );
 };
