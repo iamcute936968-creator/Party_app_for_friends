@@ -434,7 +434,8 @@ const WatchPartyApp = () => {
     if (syncInt.current) clearInterval(syncInt.current);
     if (roomListener.current) roomListener.current();
     
-    await stopShare(true);
+    const isShareOwner = Boolean((room?.shareHost && username && room.shareHost === username) || amSharing);
+    await stopShare(isShareOwner);
     
     setView('home');
     setRoom(null);
