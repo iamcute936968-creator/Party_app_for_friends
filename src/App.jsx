@@ -347,6 +347,7 @@ const WatchPartyApp = () => {
             if (st === -1 || st === 5) return;
             const t = p.getCurrentTime();
             const playing = st === 1;
+            if (!playing) return;
             await update(ref(db, '/rooms/' + room.id), { currentTime: t, isPlaying: playing });
           } catch (e) {}
         }
