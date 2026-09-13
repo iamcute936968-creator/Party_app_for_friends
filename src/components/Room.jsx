@@ -103,27 +103,35 @@ export default function Room(props) {
             style={{ display: (videoId && vidSrc === 'youtube' && !room?.isSharing) ? 'block' : 'none' }}
           ></div>
 
-          {/* Google Drive player */}
+          {/* Google Drive player - RESTORED OLD VERSION */}
           {videoId && vidSrc === 'drive' && !room?.isSharing && (
             <iframe 
               src={`https://drive.google.com/file/d/${videoId}/preview`} 
               className="w-full h-full" 
               allow="autoplay"
               allowFullScreen
+              style={{ border: 'none' }}
             />
           )}
 
-          {/* Screen Share Video - Properly constrained */}
+          {/* Screen Share Video - iOS optimized WITHOUT permanent loading */}
           <video 
             ref={vidRef} 
             autoPlay 
-            playsInline 
+            playsInline
+            webkit-playsinline="true"
             className="w-full h-full object-contain bg-black" 
             style={{ 
               display: room?.isSharing ? 'block' : 'none',
               maxWidth: '100%',
               maxHeight: '100%'
             }}
+            onLoadStart={() => console.log('📺 Video loadstart event')}
+            onLoadedMetadata={() => console.log('📺 Video metadata loaded')}
+            onCanPlay={() => console.log('📺 Video can play')}
+            onPlay={() => console.log('📺 Video playing')}
+            onPause={() => console.log('📺 Video paused')}
+            onError={(e) => console.error('📺 Video error:', e)}
           />
 
           {/* No Video message */}
@@ -133,14 +141,6 @@ export default function Room(props) {
                 <Video className="w-24 h-24 text-gray-600 mx-auto mb-4" />
                 <p className="text-gray-400 text-xl">No video</p>
               </div>
-            </div>
-          )}
-
-          {/* Sharing indicator - Single instance, fixed position */}
-          {room?.isSharing && room?.shareHost && (
-            <div className="absolute top-4 left-4 bg-red-600/90 backdrop-blur-sm text-white px-4 py-2 rounded-full flex items-center gap-2 z-20">
-              <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
-              <span className="text-sm font-semibold">{room.shareHost} is sharing</span>
             </div>
           )}
 
@@ -217,7 +217,7 @@ export default function Room(props) {
         </div>
 
         {/* Controls Bar - Always visible at bottom */}
-        <div className="bg-gray-800 p-3 border-t border-gray-700 flex-shrink-0">
+                  <div className="bg-gray-800 p-3 border-t border-gray-700 flex-shrink-0">
           <div className="flex flex-col sm:flex-row gap-2 mb-3">
             <input 
               type="text" 

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
-import { getDatabase, ref, set, update, onValue, get as fbGet } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
+import { getDatabase, ref, set, update, onValue, get as fbGet, remove, onDisconnect } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
 
 // Import components and hooks
 import Home from './components/Home';
@@ -32,7 +32,7 @@ const WatchPartyApp = () => {
   const [floatMsgs, setFloatMsgs] = useState([]);
   const [player, setPlayer] = useState(null);
   const [vidSrc, setVidSrc] = useState('youtube');
-  const [lastHostRoom, setLastHostRoom] = useState(null); // Store last hosted room
+  const [lastHostRoom, setLastHostRoom] = useState(null);
   
   // All refs
   const containerRef = useRef(null);
@@ -41,8 +41,9 @@ const WatchPartyApp = () => {
   const isHost = useRef(false);
   const syncInt = useRef(null);
   const roomListener = useRef(null);
+  const presenceRef = useRef(null);
 
-  // ✅ INTEGRATE WEBRTC HOOK HERE
+  // INTEGRATE WEBRTC HOOK
   const webRTC = useWebRTC(db, roomId, username, isHost.current, room);
   const { isSharing, amSharing, shareHost, startShare, stopShare, changeQuality, currentQuality, vidRef } = webRTC;
 
@@ -64,11 +65,30 @@ const WatchPartyApp = () => {
       try {
         const roomData = JSON.parse(savedRoom);
         setLastHostRoom(roomData);
-      } catch (e) {
-        console.log('Error loading saved room:', e);
-      }
+      } catch (e) {}
     }
   }, []);
+
+  // Setup presence system
+  useEffect(() => {
+    if (room && username) {
+      const myPresenceRef = ref(db, `/rooms/${room.id}/participants/${username}`);
+      presenceRef.current = myPresenceRef;
+      
+      // Set up disconnect handler
+      const disconnectRef = onDisconnect(myPresenceRef);
+      disconnectRef.remove();
+      
+      // Keep presence alive
+      set(myPresenceRef, true);
+    }
+    
+    return () => {
+      if (presenceRef.current) {
+        remove(presenceRef.current);
+      }
+    };
+  }, [room?.id, username, db]);
 
   // YouTube API setup
   useEffect(() => {
@@ -76,20 +96,19 @@ const WatchPartyApp = () => {
     t.src = 'https://www.youtube.com/iframe_api';
     const f = document.getElementsByTagName('script')[0];
     f.parentNode.insertBefore(t, f);
-    window.onYouTubeIframeAPIReady = () => console.log('YT Ready');
+    window.onYouTubeIframeAPIReady = () => {};
   }, []);
 
   // Real-time listener
   useEffect(() => {
     if (view === 'room' && room) {
       const roomRef_ = ref(db, '/rooms/' + room.id);
-      console.log('🔥 Starting real-time listener (WebSocket)');
       const unsubscribe = onValue(roomRef_, (snapshot) => {
         const rm = snapshot.val();
         if (rm) {
-          console.log('🔥 Real-time update received');
           setRoom(rm);
-          setParticipants(Object.keys(rm.participants || {}));
+          const participantsList = Object.keys(rm.participants || {});
+          setParticipants(participantsList);
           setMessages(rm.messages || []);
           if (rm.videoId && rm.videoId !== videoId) {
             setVideoId(rm.videoId);
@@ -102,7 +121,6 @@ const WatchPartyApp = () => {
       });
       roomListener.current = unsubscribe;
       return () => {
-        console.log('🔥 Closing real-time listener');
         unsubscribe();
       };
     }
@@ -112,24 +130,28 @@ const WatchPartyApp = () => {
   useEffect(() => {
     if (videoId && window.YT && vidSrc === 'youtube') {
       if (playerRef.current) {
-        console.log('🗑️ Destroying old player');
         playerRef.current.destroy();
         playerRef.current = null;
       }
       const c = document.getElementById('yt-player');
       if (!c) {
-        console.log('❌ No yt-player element found');
         return;
       }
-      console.log('🎬 Creating new YouTube player for video:', videoId);
       const p = new window.YT.Player('yt-player', {
         videoId: videoId,
-        playerVars: { controls: 1, disablekb: 0, modestbranding: 1, rel: 0, enablejsapi: 1 },
+        playerVars: { 
+          controls: 1, 
+          disablekb: 0, 
+          modestbranding: 1, 
+          rel: 0, 
+          enablejsapi: 1,
+          origin: window.location.origin,
+          playsinline: 1 // iOS fix
+        },
         events: {
           onReady: (e) => {
             playerRef.current = e.target;
             setPlayer(e.target);
-            console.log('🎬 Player ready');
             setTimeout(() => {
               if (isHost.current) {
                 startHostSync(e.target);
@@ -145,7 +167,7 @@ const WatchPartyApp = () => {
                 const playing = e.data === 1;
                 const t = e.target.getCurrentTime();
                 await update(ref(db, '/rooms/' + room.id), { isPlaying: playing, currentTime: t });
-              } catch (err) { console.log('❌ State change error:', err); }
+              } catch (err) {}
             }
           }
         }
@@ -159,7 +181,7 @@ const WatchPartyApp = () => {
       if (playerRef.current && vidSrc === 'youtube') {
         try {
           playerRef.current.destroy();
-        } catch (e) { console.log('Error destroying player:', e); }
+        } catch (e) {}
         playerRef.current = null;
       }
     };
@@ -207,7 +229,6 @@ const WatchPartyApp = () => {
     try {
       await set(roomRef_, rm);
       
-      // Save to localStorage for rejoin
       localStorage.setItem('lastHostedRoom', JSON.stringify({
         roomId: id,
         hostName: username,
@@ -234,12 +255,13 @@ const WatchPartyApp = () => {
       const rm = snapshot.val();
       
       if (rm && rm.host === lastHostRoom.hostName) {
-        // Room exists and you are the original host
         await update(ref(db, '/rooms/' + id + '/participants'), { [username]: true });
-        await set(ref(db, '/rooms/' + id + '/messages'), [
+        
+        const newMessages = [
           ...(rm.messages || []), 
           { type: 'system', text: username + ' (Host) rejoined', time: new Date().toLocaleTimeString(), timestamp: Date.now() }
-        ]);
+        ];
+        await set(ref(db, '/rooms/' + id + '/messages'), newMessages);
         
         setRoom(rm);
         setRoomId(id);
@@ -248,7 +270,6 @@ const WatchPartyApp = () => {
         if (rm.videoId) { setVideoId(rm.videoId); setVidSrc(rm.videoSource || 'youtube'); }
       } else {
         alert('Room not found or you are not the host');
-        // Clear invalid saved room
         localStorage.removeItem('lastHostedRoom');
         setLastHostRoom(null);
       }
@@ -268,10 +289,13 @@ const WatchPartyApp = () => {
       const rm = snapshot.val();
       if (rm) {
         await update(ref(db, '/rooms/' + id + '/participants'), { [username]: true });
-        await set(ref(db, '/rooms/' + id + '/messages'), [
+        
+        const newMessages = [
           ...(rm.messages || []), 
           { type: 'system', text: username + ' joined', time: new Date().toLocaleTimeString(), timestamp: Date.now() }
-        ]);
+        ];
+        await set(ref(db, '/rooms/' + id + '/messages'), newMessages);
+        
         setRoom(rm);
         setRoomId(id);
         setView('room');
@@ -301,7 +325,7 @@ const WatchPartyApp = () => {
       } else if (!shouldPlay && isPlaying) {
         p.pauseVideo();
       }
-    } catch (e) { console.log('❌ Member sync error:', e); }
+    } catch (e) {}
   };
 
   const startHostSync = (p) => {
@@ -315,7 +339,7 @@ const WatchPartyApp = () => {
             const t = p.getCurrentTime();
             const playing = st === 1;
             await update(ref(db, '/rooms/' + room.id), { currentTime: t, isPlaying: playing });
-          } catch (e) { console.log('❌ Host sync error:', e); }
+          } catch (e) {}
         }
       }, 500);
     }
@@ -327,32 +351,59 @@ const WatchPartyApp = () => {
       setCopied(true); 
       setTimeout(() => setCopied(false), 2000); 
     } else {
-      alert('Clipboard access is not available. Please use http://localhost or https://');
+      alert('Clipboard access is not available. Please use https://');
     }
   };
   
   const sendMsg = async () => {
     if (msgInput.trim() && room) {
-      const newMessages = [...messages, { type: 'user', user: username, text: msgInput, time: new Date().toLocaleTimeString(), timestamp: Date.now() }];
-      await set(ref(db, '/rooms/' + room.id + '/messages'), newMessages);
-      setMsgInput('');
+      try {
+        const newMsg = { 
+          type: 'user', 
+          user: username, 
+          text: msgInput.trim(), 
+          time: new Date().toLocaleTimeString(), 
+          timestamp: Date.now() 
+        };
+        
+        const snapshot = await fbGet(ref(db, '/rooms/' + room.id + '/messages'));
+        const currentMessages = snapshot.val() || [];
+        
+        await set(ref(db, '/rooms/' + room.id + '/messages'), [...currentMessages, newMsg]);
+        setMsgInput('');
+      } catch (e) {}
     }
   };
 
   const load = async () => {
     let vid = null;
     let src = 'youtube';
-    if (ytUrl.includes('youtube.com') || ytUrl.includes('youtu.be')) { vid = getYt(ytUrl); src = 'youtube'; }
-    else if (ytUrl.includes('drive.google.com')) { vid = getDrive(ytUrl); src = 'drive'; }
+    if (ytUrl.includes('youtube.com') || ytUrl.includes('youtu.be')) { 
+      vid = getYt(ytUrl); 
+      src = 'youtube'; 
+    } else if (ytUrl.includes('drive.google.com')) { 
+      vid = getDrive(ytUrl); 
+      src = 'drive'; 
+    }
+    
     if (vid && room) {
       await update(ref(db, '/rooms/' + room.id), { videoId: vid, videoSource: src, isPlaying: false, currentTime: 0 });
-      await set(ref(db, '/rooms/' + room.id + '/messages'), [
-        ...messages, 
-        { type: 'system', text: username + ' loaded ' + (src === 'youtube' ? 'YouTube' : 'Drive') + ' video', time: new Date().toLocaleTimeString(), timestamp: Date.now() }
-      ]);
+      
+      const snapshot = await fbGet(ref(db, '/rooms/' + room.id + '/messages'));
+      const currentMessages = snapshot.val() || [];
+      const newMsg = { 
+        type: 'system', 
+        text: username + ' loaded ' + (src === 'youtube' ? 'YouTube' : 'Google Drive') + ' video', 
+        time: new Date().toLocaleTimeString(), 
+        timestamp: Date.now() 
+      };
+      await set(ref(db, '/rooms/' + room.id + '/messages'), [...currentMessages, newMsg]);
+      
       setVideoId(vid);
       setVidSrc(src);
-    } else { alert('Invalid URL'); }
+    } else { 
+      alert('Invalid URL'); 
+    }
   };
 
   const togglePlay = async () => {
@@ -364,7 +415,7 @@ const WatchPartyApp = () => {
       await update(ref(db, '/rooms/' + room.id), { isPlaying: playing, currentTime: t });
       if (playing) playerRef.current.playVideo();
       else playerRef.current.pauseVideo();
-    } catch (e) { console.log('Toggle play error:', e); }
+    } catch (e) {}
   };
 
   const toggleFs = () => {
@@ -373,11 +424,23 @@ const WatchPartyApp = () => {
   };
 
   const leave = async () => {
-    if (room) {
-      const pts = { ...room.participants };
-      delete pts[username];
-      await update(ref(db, '/rooms/' + room.id), { participants: pts });
+    if (room && username) {
+      try {
+        const participantRef = ref(db, `/rooms/${room.id}/participants/${username}`);
+        await remove(participantRef);
+        
+        const snapshot = await fbGet(ref(db, '/rooms/' + room.id + '/messages'));
+        const currentMessages = snapshot.val() || [];
+        const leaveMsg = { 
+          type: 'system', 
+          text: username + ' left', 
+          time: new Date().toLocaleTimeString(), 
+          timestamp: Date.now() 
+        };
+        await set(ref(db, '/rooms/' + room.id + '/messages'), [...currentMessages, leaveMsg]);
+      } catch (e) {}
     }
+    
     if (playerRef.current) { playerRef.current.destroy(); playerRef.current = null; }
     if (syncInt.current) clearInterval(syncInt.current);
     if (roomListener.current) roomListener.current();
@@ -395,7 +458,6 @@ const WatchPartyApp = () => {
     isHost.current = false;
   };
 
-  // Render
   if (view === 'home') {
     return (
       <Home 

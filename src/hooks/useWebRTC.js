@@ -2,11 +2,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { ref, set, update, onValue, off, remove, get as fbGet } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
 
-// WebRTC STUN servers
+// WebRTC STUN servers - Including alternatives for restricted regions
 const servers = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:global.stun.twilio.com:3478' }
   ],
 };
 
@@ -18,7 +20,6 @@ const qualityPresets = {
   'auto': { width: 1920, height: 1080, frameRate: 30 }
 };
 
-// Hook accepts roomData
 export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
   const [isSharing, setIsSharing] = useState(false);
   const [amSharing, setAmSharing] = useState(false);
@@ -32,57 +33,84 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
 
   const createPeerConnection = useCallback(async (peerUsername, isOfferer = false) => {
     if (!roomId || !username) {
-      console.error("WebRTC Hook: Cannot create PC - missing room/user");
       return null;
     }
     
     if (peerConnections.current[peerUsername]) {
-      console.warn("WebRTC Hook: PC already exists for", peerUsername);
       return peerConnections.current[peerUsername];
     }
 
-    console.log(`WebRTC Hook: Creating PC for ${peerUsername}, isOfferer: ${isOfferer}`);
     let pc;
     try { 
       pc = new RTCPeerConnection(servers); 
     } catch (error) { 
-      console.error("WebRTC Hook: PC creation failed:", error); 
       return null; 
     }
     
     peerConnections.current[peerUsername] = pc;
 
-    // Event Handlers
     pc.onicecandidate = (event) => {
       if (event.candidate && roomId) {
-        console.log(`WebRTC Hook: Sending ICE to ${peerUsername}`);
         const iceRef = ref(db, `/rooms/${roomId}/webrtc/ice/${peerUsername}/${username}_${Date.now()}`);
-        set(iceRef, { from: username, ice: event.candidate.toJSON() })
-          .catch(err => console.error("WebRTC Hook: Send ICE failed:", err));
-      } else if (!event.candidate) { 
-        console.log(`WebRTC Hook: ICE gathering finished for ${peerUsername}.`); 
+        set(iceRef, { from: username, ice: event.candidate.toJSON() }).catch(() => {});
       }
     };
 
     pc.ontrack = (event) => {
-      console.log(`✅ WebRTC Hook: ontrack EVENT for ${peerUsername}`, event.streams);
+      console.log(`🎥 ontrack fired! Peer: ${peerUsername}`, event.streams);
       if (vidRef.current && event.streams?.[0]) {
+        console.log('📹 Video ref exists, setting srcObject');
         if (vidRef.current.srcObject !== event.streams[0]) {
-          console.log('WebRTC Hook: Setting remote stream to video element');
           vidRef.current.srcObject = event.streams[0];
+          console.log('✅ srcObject set to:', event.streams[0]);
+          
+          // IMPORTANT: Don't mute for viewers!
           vidRef.current.muted = false;
-          vidRef.current.play()
-            .then(() => console.log("WebRTC Hook: Remote stream playback started."))
-            .catch(e => console.error("WebRTC Hook: Error auto-playing remote stream:", e));
-          setIsSharing(true);
+          vidRef.current.autoplay = true;
+          vidRef.current.playsInline = true;
+          
+          console.log('▶️ Attempting to play video...');
+          const playVideo = async () => {
+            try {
+              await vidRef.current.play();
+              console.log('✅ Video playing successfully!');
+              setIsSharing(true);
+            } catch (err) {
+              console.error('❌ Play failed, trying muted:', err);
+              // iOS blocks unmuted autoplay, try muted
+              vidRef.current.muted = true;
+              try {
+                await vidRef.current.play();
+                console.log('✅ Video playing muted, will unmute in 1s');
+                setIsSharing(true);
+                // Unmute after 1 second
+                setTimeout(() => {
+                  if (vidRef.current) {
+                    console.log('🔊 Unmuting video');
+                    vidRef.current.muted = false;
+                  }
+                }, 1000);
+              } catch (err2) {
+                console.error('❌ Even muted play failed:', err2);
+                setIsSharing(true);
+              }
+            }
+          };
+          
+          playVideo();
+        } else {
+          console.log('⚠️ srcObject already set, skipping');
         }
+      } else {
+        console.error('❌ Missing vidRef or stream!', {
+          hasVidRef: !!vidRef.current,
+          hasStream: !!event.streams?.[0]
+        });
       }
     };
 
     pc.onconnectionstatechange = () => {
-      console.log(`WebRTC Hook: Connection state with ${peerUsername}: ${pc.connectionState}`);
       if (['failed', 'closed'].includes(pc.connectionState)) {
-        console.warn(`WebRTC Hook: Connection ${pc.connectionState} with ${peerUsername}. Cleaning up.`);
         if (peerConnections.current[peerUsername]) {
           peerConnections.current[peerUsername].close();
           delete peerConnections.current[peerUsername];
@@ -91,7 +119,6 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.log(`WebRTC Hook: ICE state with ${peerUsername}: ${pc.iceConnectionState}`);
       if (['failed', 'closed'].includes(pc.iceConnectionState)) {
         if (peerConnections.current[peerUsername]) {
           peerConnections.current[peerUsername].close();
@@ -100,43 +127,30 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
       }
     };
 
-    // Add local stream tracks if I am the offerer (sharer)
     if (isOfferer && localStream.current) {
-      console.log('WebRTC Hook: Adding local tracks for', peerUsername);
       localStream.current.getTracks().forEach(track => { 
         try { 
           pc.addTrack(track, localStream.current); 
-        } catch (e) { 
-          console.error(`AddTrack error: ${e}`); 
-        } 
+        } catch (e) {} 
       });
     }
 
-    // If offerer, create and send offer
     if (isOfferer && roomId) {
-      console.log(`WebRTC Hook: Creating offer for ${peerUsername}`);
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        console.log('WebRTC Hook: Sending offer to', peerUsername);
         await set(ref(db, `/rooms/${roomId}/webrtc/offers/${peerUsername}`), { 
           from: username, 
           sdp: offer 
         });
-      } catch (err) { 
-        console.error(`WebRTC Hook: Offer error for ${peerUsername}:`, err); 
-      }
+      } catch (err) {}
     }
 
-    // Process pending ICE candidates
     if (pendingIceCandidates.current[peerUsername]) {
-      console.log(`WebRTC Hook: Processing ${pendingIceCandidates.current[peerUsername].length} pending ICE for ${peerUsername}`);
       for (const candidate of pendingIceCandidates.current[peerUsername]) {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
-        } catch (e) {
-          console.error("WebRTC Hook: Error adding pending ICE:", e);
-        }
+        } catch (e) {}
       }
       delete pendingIceCandidates.current[peerUsername];
     }
@@ -145,7 +159,6 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
   }, [db, roomId, username]);
 
   const stopShare = useCallback(async (updateDb = true) => {
-    console.log(`WebRTC Hook: Stopping share...`);
     if (localStream.current) {
       localStream.current.getTracks().forEach(track => { 
         track.onended = null; 
@@ -174,15 +187,12 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
       try {
         await update(ref(db, `/rooms/${roomId}`), { isSharing: false, shareHost: null });
         await remove(ref(db, `/rooms/${roomId}/webrtc`));
-      } catch (error) { 
-        console.error("WebRTC Hook: Firebase update failed:", error); 
-      }
+      } catch (error) {}
     }
   }, [db, roomId]);
 
   const startShare = useCallback(async (quality = 'high') => {
     if (!roomId || amSharing) return;
-    console.log("WebRTC Hook: Starting share with quality:", quality);
     
     await update(ref(db, `/rooms/${roomId}`), { 
       videoId: null, 
@@ -193,7 +203,6 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
 
     try {
       const preset = qualityPresets[quality] || qualityPresets['high'];
-      console.log('WebRTC Hook: Requesting display media with preset:', preset);
       
       const stream = await navigator.mediaDevices.getDisplayMedia({ 
         video: { 
@@ -205,14 +214,13 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
         audio: true
       });
       
-      console.log('WebRTC Hook: Got stream');
       localStream.current = stream;
       setCurrentQuality(quality);
 
       if (vidRef.current) {
         vidRef.current.srcObject = stream;
         vidRef.current.muted = true;
-        vidRef.current.play().catch(e => console.error("Error playing local:", e));
+        vidRef.current.play().catch(() => {});
       }
 
       setAmSharing(true);
@@ -230,19 +238,15 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
         .map(pUsername => createPeerConnection(pUsername, true));
 
       await Promise.all(offerPromises);
-      console.log('WebRTC Hook: Offers initiated.');
     } catch(err) {
-      console.error("WebRTC Hook: Error starting share:", err);
       if (err.name === 'NotAllowedError') alert('Screen sharing permission denied.');
       else alert('Failed to start share.');
       await stopShare(true);
     }
   }, [db, roomId, username, amSharing, createPeerConnection, stopShare]);
 
-  // Change quality while sharing (host only)
   const changeQuality = useCallback(async (newQuality) => {
     if (!amSharing || !localStream.current) {
-      console.warn("Not sharing or no stream available");
       return;
     }
 
@@ -257,14 +261,10 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
           frameRate: { ideal: preset.frameRate }
         });
         setCurrentQuality(newQuality);
-        console.log(`Quality changed to ${newQuality}:`, preset);
-      } catch (err) {
-        console.error("Failed to change quality:", err);
-      }
+      } catch (err) {}
     }
   }, [amSharing]);
 
-  // Effect for WebRTC Signaling
   useEffect(() => {
     if (!roomId || !username) return;
     let offerListenerUnsubscribe = () => {};
@@ -275,7 +275,6 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
       const offerCallback = async (snapshot) => {
         if (snapshot.exists()) {
           const offerData = snapshot.val();
-          console.log(`Member: Processing offer from ${offerData.from}`);
           
           let pc = peerConnections.current[offerData.from];
           if (!pc) { 
@@ -294,9 +293,7 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
               from: username, 
               sdp: answer 
             });
-          } catch (err) { 
-            console.error("Member: Error processing offer:", err); 
-          } finally { 
+          } catch (err) {} finally { 
             remove(offerRef); 
           }
         }
@@ -313,12 +310,9 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
           const pc = peerConnections.current[peerUsername];
           
           if (pc && !pc.currentRemoteDescription) {
-            console.log(`Sharer: Processing answer from ${peerUsername}`);
             try {
               await pc.setRemoteDescription(new RTCSessionDescription(answerData.sdp));
-            } catch(err) { 
-              console.error(`Sharer: Error setting remote:`, err); 
-            } finally { 
+            } catch(err) {} finally { 
               remove(answerRef); 
             }
           } else { 
@@ -335,7 +329,6 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
     };
   }, [db, roomId, username, isRoomHost, createPeerConnection]);
 
-  // Effect for ICE Candidates
   useEffect(() => {
     if (!roomId || !username) return;
     const iceRef = ref(db, `/rooms/${roomId}/webrtc/ice/${username}`);
@@ -353,9 +346,7 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
           if (pc && pc.remoteDescription) {
             try {
               await pc.addIceCandidate(new RTCIceCandidate(candidateData.ice));
-            } catch (e) {
-              console.error("Error adding ICE:", e);
-            }
+            } catch (e) {}
           } else {
             if (!pendingIceCandidates.current[peerUsername]) {
               pendingIceCandidates.current[peerUsername] = [];
@@ -372,7 +363,6 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
     return () => { unsubscribe(); };
   }, [db, roomId, username]);
 
-  // Sync with roomData
   useEffect(() => {
     const dbIsSharing = !!roomData?.isSharing;
     const dbShareHost = roomData?.shareHost || null;
