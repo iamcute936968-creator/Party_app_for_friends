@@ -33,6 +33,7 @@ const WatchPartyApp = () => {
   const [player, setPlayer] = useState(null);
   const [vidSrc, setVidSrc] = useState('youtube');
   const [lastHostRoom, setLastHostRoom] = useState(null);
+  const [ytReady, setYtReady] = useState(false);
   
   // All refs
   const containerRef = useRef(null);
@@ -92,11 +93,20 @@ const WatchPartyApp = () => {
 
   // YouTube API setup
   useEffect(() => {
-    const t = document.createElement('script');
-    t.src = 'https://www.youtube.com/iframe_api';
-    const f = document.getElementsByTagName('script')[0];
-    f.parentNode.insertBefore(t, f);
-    window.onYouTubeIframeAPIReady = () => {};
+    // If the API is already fully initialised (e.g. hot-reload / re-mount)
+    if (window.YT && window.YT.Player) {
+      setYtReady(true);
+      return;
+    }
+    // Wire the ready callback BEFORE injecting the script so we never miss it
+    window.onYouTubeIframeAPIReady = () => setYtReady(true);
+    // Guard against duplicate injection (e.g. StrictMode double-mount)
+    if (!document.querySelector('script[src*="youtube.com/iframe_api"]')) {
+      const t = document.createElement('script');
+      t.src = 'https://www.youtube.com/iframe_api';
+      const f = document.getElementsByTagName('script')[0];
+      f.parentNode.insertBefore(t, f);
+    }
   }, []);
 
   // Real-time listener
@@ -132,7 +142,7 @@ const WatchPartyApp = () => {
 
   // YouTube player setup
   useEffect(() => {
-    if (videoId && window.YT && vidSrc === 'youtube') {
+    if (videoId && ytReady && window.YT && window.YT.Player && vidSrc === 'youtube') {
       if (playerRef.current) {
         playerRef.current.destroy();
         playerRef.current = null;
@@ -189,7 +199,7 @@ const WatchPartyApp = () => {
         playerRef.current = null;
       }
     };
-  }, [videoId, vidSrc]);
+  }, [videoId, vidSrc, ytReady]);
 
   // Floating messages
   useEffect(() => {
