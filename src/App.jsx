@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
-import { getDatabase, ref, set, update, onValue, get as fbGet, remove, onDisconnect } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
+import { getDatabase, ref, set, push, update, onValue, get as fbGet, remove, onDisconnect } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
 
 // Import components and hooks
 import Home from './components/Home';
@@ -109,7 +109,11 @@ const WatchPartyApp = () => {
           setRoom(rm);
           const participantsList = Object.keys(rm.participants || {});
           setParticipants(participantsList);
-          setMessages(rm.messages || []);
+          const rawMsgs = rm.messages || {};
+          const msgArray = Array.isArray(rawMsgs)
+            ? rawMsgs
+            : Object.values(rawMsgs).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+          setMessages(msgArray);
           if (rm.videoId && rm.videoId !== videoId) {
             setVideoId(rm.videoId);
             setVidSrc(rm.videoSource || 'youtube');
@@ -221,7 +225,6 @@ const WatchPartyApp = () => {
       videoSource: 'youtube', 
       isPlaying: false, 
       currentTime: 0, 
-      messages: [], 
       roomName: username + "'s Room",
       isSharing: false,
       shareHost: null
@@ -257,11 +260,9 @@ const WatchPartyApp = () => {
       if (rm && rm.host === lastHostRoom.hostName) {
         await update(ref(db, '/rooms/' + id + '/participants'), { [username]: true });
         
-        const newMessages = [
-          ...(rm.messages || []), 
+        await push(ref(db, '/rooms/' + id + '/messages'), 
           { type: 'system', text: username + ' (Host) rejoined', time: new Date().toLocaleTimeString(), timestamp: Date.now() }
-        ];
-        await set(ref(db, '/rooms/' + id + '/messages'), newMessages);
+        );
         
         setRoom(rm);
         setRoomId(id);
@@ -290,11 +291,9 @@ const WatchPartyApp = () => {
       if (rm) {
         await update(ref(db, '/rooms/' + id + '/participants'), { [username]: true });
         
-        const newMessages = [
-          ...(rm.messages || []), 
+        await push(ref(db, '/rooms/' + id + '/messages'), 
           { type: 'system', text: username + ' joined', time: new Date().toLocaleTimeString(), timestamp: Date.now() }
-        ];
-        await set(ref(db, '/rooms/' + id + '/messages'), newMessages);
+        );
         
         setRoom(rm);
         setRoomId(id);
@@ -365,11 +364,7 @@ const WatchPartyApp = () => {
           time: new Date().toLocaleTimeString(), 
           timestamp: Date.now() 
         };
-        
-        const snapshot = await fbGet(ref(db, '/rooms/' + room.id + '/messages'));
-        const currentMessages = snapshot.val() || [];
-        
-        await set(ref(db, '/rooms/' + room.id + '/messages'), [...currentMessages, newMsg]);
+        await push(ref(db, '/rooms/' + room.id + '/messages'), newMsg);
         setMsgInput('');
       } catch (e) {}
     }
@@ -389,15 +384,12 @@ const WatchPartyApp = () => {
     if (vid && room) {
       await update(ref(db, '/rooms/' + room.id), { videoId: vid, videoSource: src, isPlaying: false, currentTime: 0 });
       
-      const snapshot = await fbGet(ref(db, '/rooms/' + room.id + '/messages'));
-      const currentMessages = snapshot.val() || [];
-      const newMsg = { 
+      await push(ref(db, '/rooms/' + room.id + '/messages'), { 
         type: 'system', 
         text: username + ' loaded ' + (src === 'youtube' ? 'YouTube' : 'Google Drive') + ' video', 
         time: new Date().toLocaleTimeString(), 
         timestamp: Date.now() 
-      };
-      await set(ref(db, '/rooms/' + room.id + '/messages'), [...currentMessages, newMsg]);
+      });
       
       setVideoId(vid);
       setVidSrc(src);
@@ -429,15 +421,12 @@ const WatchPartyApp = () => {
         const participantRef = ref(db, `/rooms/${room.id}/participants/${username}`);
         await remove(participantRef);
         
-        const snapshot = await fbGet(ref(db, '/rooms/' + room.id + '/messages'));
-        const currentMessages = snapshot.val() || [];
-        const leaveMsg = { 
+        await push(ref(db, '/rooms/' + room.id + '/messages'), { 
           type: 'system', 
           text: username + ' left', 
           time: new Date().toLocaleTimeString(), 
           timestamp: Date.now() 
-        };
-        await set(ref(db, '/rooms/' + room.id + '/messages'), [...currentMessages, leaveMsg]);
+        });
       } catch (e) {}
     }
     
