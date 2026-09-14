@@ -44,6 +44,11 @@ const WatchPartyApp = () => {
   const roomListener = useRef(null);
   const presenceRef = useRef(null);
   const serverTimeOffset = useRef(0);
+  const suppressNextStateChange = useRef(false);
+  // Stores the active fallback-timeout ID so we can cancel it if onStateChange
+  // consumes the suppression first, preventing a stale timeout from clearing a
+  // newer suppression window (generation-safe via cancel-before-create pattern).
+  const suppressTimeoutRef = useRef(null);
 
   // INTEGRATE WEBRTC HOOK
   const webRTC = useWebRTC(db, roomId, username, isHost.current, room);
@@ -186,11 +191,37 @@ const WatchPartyApp = () => {
           },
           onStateChange: async (e) => {
             if (!isHost.current) return;
+            // Ignore transient states: BUFFERING(3), CUED(5), UNSTARTED(-1).
+            // Buffering is a local condition and must not pause the room.
+            const state = e.data;
+            if (state !== 0 && state !== 1 && state !== 2) return;
+            // Suppress the duplicate event that follows a togglePlay write.
+            if (suppressNextStateChange.current) {
+              suppressNextStateChange.current = false;
+              // Cancel the fallback timeout — event arrived before it fired.
+              if (suppressTimeoutRef.current) {
+                clearTimeout(suppressTimeoutRef.current);
+                suppressTimeoutRef.current = null;
+              }
+              return;
+            }
             if (room) {
               try {
-                const playing = e.data === 1;
                 const t = e.target.getCurrentTime();
-                await update(ref(db, '/rooms/' + room.id), { isPlaying: playing, currentTime: t });
+                // ENDED(0) → represent as PAUSED at the final position.
+                // PLAYING(1) → new anchor at current position.
+                // PAUSED(2) → anchor at current position.
+                const isPlaying = state === 1;
+                const playbackState = isPlaying ? 'PLAYING' : 'PAUSED';
+                await update(ref(db, '/rooms/' + room.id), {
+                  // Reference-clock fields
+                  playbackState,
+                  anchorTime: t,
+                  updatedAt: serverTimestamp(),
+                  // Legacy fields — kept for member compat until Phase 3 is live
+                  isPlaying,
+                  currentTime: t
+                });
               } catch (err) {}
             }
           }
@@ -407,7 +438,17 @@ const WatchPartyApp = () => {
     }
     
     if (vid && room) {
-      await update(ref(db, '/rooms/' + room.id), { videoId: vid, videoSource: src, isPlaying: false, currentTime: 0 });
+      await update(ref(db, '/rooms/' + room.id), {
+        videoId: vid,
+        videoSource: src,
+        // Legacy fields
+        isPlaying: false,
+        currentTime: 0,
+        // Reference-clock fields — new video starts paused at 0
+        playbackState: 'PAUSED',
+        anchorTime: 0,
+        updatedAt: serverTimestamp()
+      });
       
       await push(ref(db, '/rooms/' + room.id + '/messages'), { 
         type: 'system', 
@@ -429,10 +470,38 @@ const WatchPartyApp = () => {
     let t = 0;
     try {
       t = playerRef.current.getCurrentTime();
-      await update(ref(db, '/rooms/' + room.id), { isPlaying: playing, currentTime: t });
+      // Publish the authoritative Firebase transition FIRST.
+      // The suppression flag is armed AFTER the await so that the Firebase
+      // network round-trip is NOT inside the suppression window. Any YouTube
+      // events arriving during the await are legitimate and must not be swallowed.
+      await update(ref(db, '/rooms/' + room.id), {
+        // Reference-clock fields
+        playbackState: playing ? 'PLAYING' : 'PAUSED',
+        anchorTime: t,
+        updatedAt: serverTimestamp(),
+        // Legacy fields
+        isPlaying: playing,
+        currentTime: t
+      });
+      // Arm suppression immediately before calling the player so only the
+      // single onStateChange that follows this call is suppressed.
+      if (suppressTimeoutRef.current) clearTimeout(suppressTimeoutRef.current);
+      suppressNextStateChange.current = true;
+      suppressTimeoutRef.current = setTimeout(() => {
+        // Fallback: if YouTube never emits the expected state event (e.g. player
+        // was already in that state), clear the flag so the next genuine event
+        // is not accidentally swallowed.
+        suppressNextStateChange.current = false;
+        suppressTimeoutRef.current = null;
+      }, 1000);
       if (playing) playerRef.current.playVideo();
       else playerRef.current.pauseVideo();
-    } catch (e) {}
+    } catch (e) {
+      // Write or player call failed — clear suppression so no future event is lost.
+      if (suppressTimeoutRef.current) clearTimeout(suppressTimeoutRef.current);
+      suppressTimeoutRef.current = null;
+      suppressNextStateChange.current = false;
+    }
   };
 
   const toggleFs = () => {

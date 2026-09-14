@@ -1,6 +1,6 @@
 // src/hooks/useWebRTC.js
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { ref, set, update, onValue, off, remove, get as fbGet } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
+import { ref, set, update, onValue, off, remove, get as fbGet, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
 
 // WebRTC STUN servers - Including alternatives for restricted regions
 const servers = {
@@ -197,8 +197,13 @@ export function useWebRTC(db, roomId, username, isRoomHost, roomData) {
     await update(ref(db, `/rooms/${roomId}`), { 
       videoId: null, 
       videoSource: null, 
+      // Legacy fields
       isPlaying: false, 
-      currentTime: 0 
+      currentTime: 0,
+      // Reference-clock fields — screen share clears video state
+      playbackState: 'PAUSED',
+      anchorTime: 0,
+      updatedAt: serverTimestamp()
     });
 
     try {
