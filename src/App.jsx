@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
-import { getDatabase, ref, set, push, update, onValue, get as fbGet, remove, onDisconnect } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
+import { getDatabase, ref, set, push, update, onValue, get as fbGet, remove, onDisconnect, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
 
 // Import components and hooks
 import Home from './components/Home';
@@ -43,6 +43,7 @@ const WatchPartyApp = () => {
   const syncInt = useRef(null);
   const roomListener = useRef(null);
   const presenceRef = useRef(null);
+  const serverTimeOffset = useRef(0);
 
   // INTEGRATE WEBRTC HOOK
   const webRTC = useWebRTC(db, roomId, username, isHost.current, room);
@@ -68,6 +69,15 @@ const WatchPartyApp = () => {
         setLastHostRoom(roomData);
       } catch (e) {}
     }
+  }, []);
+
+  // Track Firebase server-time offset for reference-clock calculations
+  useEffect(() => {
+    const offsetRef = ref(db, '.info/serverTimeOffset');
+    const unsubscribe = onValue(offsetRef, (snap) => {
+      serverTimeOffset.current = snap.val() || 0;
+    });
+    return () => unsubscribe();
   }, []);
 
   // Setup presence system
@@ -237,7 +247,11 @@ const WatchPartyApp = () => {
       currentTime: 0, 
       roomName: username + "'s Room",
       isSharing: false,
-      shareHost: null
+      shareHost: null,
+      // Reference-clock fields (Phase 1: initialized, not yet consumed)
+      playbackState: 'PAUSED',
+      anchorTime: 0,
+      updatedAt: 0
     };
     try {
       await set(roomRef_, rm);
