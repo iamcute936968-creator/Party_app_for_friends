@@ -14,6 +14,31 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app, "https://watch-party-app-9fc62-default-rtdb.asia-southeast1.firebasedatabase.app");
 
+/**
+ * Calculate the expected playback position from the reference clock.
+ *
+ * @param {Object}  rc                Reference-clock snapshot from room
+ * @param {string}  rc.playbackState  'PLAYING' | 'PAUSED'
+ * @param {number}  rc.anchorTime     Seconds into video when anchor was set
+ * @param {number}  rc.updatedAt      Server-epoch-ms when anchor was set
+ * @param {number}  serverTimeOffset  Firebase /.info/serverTimeOffset (ms)
+ * @returns {number|null}             Expected position in seconds, or null when
+ *                                    reference-clock data is not yet valid
+ *                                    (triggers legacy fallback on the call site)
+ */
+const getExpectedPosition = (rc, serverTimeOffset) => {
+  if (!rc || !rc.playbackState || typeof rc.anchorTime !== 'number' || !rc.updatedAt) {
+    return null;
+  }
+  if (rc.playbackState === 'PAUSED') {
+    return Math.max(0, rc.anchorTime);
+  }
+  // PLAYING: advance anchorTime by elapsed server time
+  const serverNow = Date.now() + serverTimeOffset;
+  const elapsedSec = (serverNow - rc.updatedAt) / 1000;
+  return Math.max(0, rc.anchorTime + elapsedSec);
+};
+
 const WatchPartyApp = () => {
   // All state
   const [view, setView] = useState('home');
@@ -144,7 +169,7 @@ const WatchPartyApp = () => {
             setVidSrc(rm.videoSource || 'youtube');
           }
           if (!isHost.current && playerRef.current && vidSrc === 'youtube') {
-            syncMemberPlayer(playerRef.current, rm);
+            syncMemberPlayerRefClock(playerRef.current, rm, serverTimeOffset.current);
           }
         }
       });
@@ -185,7 +210,7 @@ const WatchPartyApp = () => {
               if (isHost.current) {
                 startHostSync(e.target);
               } else if (room) {
-                syncMemberPlayer(e.target, room);
+                syncMemberPlayerRefClock(e.target, room, serverTimeOffset.current);
               }
             }, 500);
           },
@@ -378,6 +403,59 @@ const WatchPartyApp = () => {
         p.playVideo();
       } else if (!shouldPlay && isPlaying) {
         p.pauseVideo();
+      }
+    } catch (e) {}
+  };
+
+  /**
+   * Member synchronization using the reference clock.
+   * Falls back to the legacy syncMemberPlayer when reference-clock data is
+   * missing (pre-Phase-2 rooms) or not yet populated.
+   *
+   * Buffering rules:
+   *   PLAYING + buffering  → do not fight buffer; YouTube will resume naturally.
+   *   PAUSED  + buffering  → force pause; prevents member auto-playing after buffer.
+   */
+  const syncMemberPlayerRefClock = (player, currentRoom, offset) => {
+    if (!player || !currentRoom) return;
+    try {
+      const st = player.getPlayerState();
+      // UNSTARTED (-1): player not initialised — cannot issue any commands.
+      // CUED (5): player is ready but hasn't started; allow reference-clock
+      // calculation so late joiners can seek to the correct position.
+      if (st === -1) return;
+
+      const expected = getExpectedPosition(currentRoom, offset);
+
+      // Reference clock not valid → use legacy sync as migration fallback
+      if (expected === null) {
+        syncMemberPlayer(player, currentRoom);
+        return;
+      }
+
+      const shouldPlay = currentRoom.playbackState === 'PLAYING';
+      const ct = player.getCurrentTime();
+      const drift = Math.abs(ct - expected);
+
+      // Hard seek when drift exceeds 2-second threshold
+      if (drift >= 2) {
+        player.seekTo(expected, true);
+      }
+
+      const isPlaying = st === 1;
+      const isBuffering = st === 3;
+
+      // PLAYING room + buffering → let YouTube resolve buffer naturally.
+      // PLAYING room + CUED → st===5: isPlaying=false, isBuffering=false,
+      // so playVideo() is called here, starting the video at the seeked position.
+      if (shouldPlay && !isPlaying && !isBuffering) {
+        player.playVideo();
+      // PAUSED room + playing, buffering, OR cued → force pause.
+      // The st===5 (CUED) case is required: without it, seekTo() from CUED
+      // state leaves the player ready-to-play; not calling pauseVideo() here
+      // would allow it to start automatically after the seek resolves.
+      } else if (!shouldPlay && (isPlaying || isBuffering || st === 5)) {
+        player.pauseVideo();
       }
     } catch (e) {}
   };
