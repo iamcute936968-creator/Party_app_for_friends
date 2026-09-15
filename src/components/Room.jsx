@@ -248,7 +248,7 @@ export default function Room(props) {
                   onClick={togglePlay} 
                   className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-sm"
                 >
-                  {room?.isPlaying ? 'Pause' : 'Play'}
+                  {room?.playbackState === 'PLAYING' ? 'Pause' : 'Play'}
                 </button>
               )}
             </div>

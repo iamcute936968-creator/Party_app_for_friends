@@ -65,7 +65,6 @@ const WatchPartyApp = () => {
   const lastMsgRef = useRef(null);
   const playerRef = useRef(null);
   const isHost = useRef(false);
-  const syncInt = useRef(null);
   const roomListener = useRef(null);
   const presenceRef = useRef(null);
   const serverTimeOffset = useRef(0);
@@ -74,6 +73,16 @@ const WatchPartyApp = () => {
   // consumes the suppression first, preventing a stale timeout from clearing a
   // newer suppression window (generation-safe via cancel-before-create pattern).
   const suppressTimeoutRef = useRef(null);
+  // Always mirrors the latest React room state so closures (onReady timer,
+  // member reconciliation interval) never read stale room data.
+  const roomRef = useRef(null);
+  // Member-only 5-second local reconciliation interval.
+  // Zero Firebase operations — local YouTube commands only.
+  const memberSyncInt = useRef(null);
+
+  // Keep roomRef synchronized with the latest room state on every render.
+  // This breaks stale closures in onReady callbacks and the reconciliation timer.
+  roomRef.current = room;
 
   // INTEGRATE WEBRTC HOOK
   const webRTC = useWebRTC(db, roomId, username, isHost.current, room);
@@ -208,9 +217,24 @@ const WatchPartyApp = () => {
             setPlayer(e.target);
             setTimeout(() => {
               if (isHost.current) {
-                startHostSync(e.target);
-              } else if (room) {
-                syncMemberPlayerRefClock(e.target, room, serverTimeOffset.current);
+                // Sync host player FROM the existing Firebase reference clock.
+                // This ensures a rejoining host never overwrites the valid room
+                // anchor with stale/uninitialized local player state.
+                // The subsequent onStateChange from the seek/play call will
+                // write the correct post-seek position as a fresh anchor.
+                syncMemberPlayerRefClock(e.target, roomRef.current, serverTimeOffset.current);
+              } else if (roomRef.current) {
+                // Initial member sync using ref (avoids stale closure).
+                syncMemberPlayerRefClock(e.target, roomRef.current, serverTimeOffset.current);
+                // Start local-only reconciliation timer.
+                // Catches silent drift (tab throttling, YouTube anomalies) without
+                // any Firebase reads or writes.
+                if (memberSyncInt.current) clearInterval(memberSyncInt.current);
+                memberSyncInt.current = setInterval(() => {
+                  if (playerRef.current && roomRef.current && !isHost.current) {
+                    syncMemberPlayerRefClock(playerRef.current, roomRef.current, serverTimeOffset.current);
+                  }
+                }, 5000);
               }
             }, 500);
           },
@@ -253,10 +277,10 @@ const WatchPartyApp = () => {
         }
       });
     }
-    return () => { 
-      if (syncInt.current) {
-        clearInterval(syncInt.current);
-        syncInt.current = null;
+    return () => {
+      if (memberSyncInt.current) {
+        clearInterval(memberSyncInt.current);
+        memberSyncInt.current = null;
       }
       if (playerRef.current && vidSrc === 'youtube') {
         try {
@@ -460,23 +484,9 @@ const WatchPartyApp = () => {
     } catch (e) {}
   };
 
-  const startHostSync = (p) => {
-    if (syncInt.current) clearInterval(syncInt.current);
-    if (vidSrc === 'youtube' && p) {
-      syncInt.current = setInterval(async () => {
-        if (room && isHost.current && p) {
-          try {
-            const st = p.getPlayerState();
-            if (st === -1 || st === 5) return;
-            const t = p.getCurrentTime();
-            const playing = st === 1;
-            if (!playing) return;
-            await update(ref(db, '/rooms/' + room.id), { currentTime: t, isPlaying: playing });
-          } catch (e) {}
-        }
-      }, 500);
-    }
-  };
+  // startHostSync removed in Phase 4.
+  // The 500ms legacy heartbeat only wrote isPlaying/currentTime.
+  // Reference-clock writes are now fully event-driven via onStateChange and togglePlay.
 
   const copy = () => { 
     if (navigator.clipboard) {
@@ -544,7 +554,9 @@ const WatchPartyApp = () => {
 
   const togglePlay = async () => {
     if (!room || vidSrc !== 'youtube' || !playerRef.current) return;
-    const playing = !room.isPlaying;
+    // Use reference-clock field — not the legacy isPlaying field — to determine
+    // the toggled state. isPlaying is kept for schema compatibility only.
+    const playing = room.playbackState !== 'PLAYING';
     let t = 0;
     try {
       t = playerRef.current.getCurrentTime();
@@ -603,7 +615,7 @@ const WatchPartyApp = () => {
     }
     
     if (playerRef.current) { playerRef.current.destroy(); playerRef.current = null; }
-    if (syncInt.current) clearInterval(syncInt.current);
+    if (memberSyncInt.current) { clearInterval(memberSyncInt.current); memberSyncInt.current = null; }
     if (roomListener.current) roomListener.current();
     
     const isShareOwner = Boolean((room?.shareHost && username && room.shareHost === username) || amSharing);
