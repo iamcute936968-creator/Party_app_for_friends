@@ -6,6 +6,12 @@ import { getDatabase, ref, set, push, update, onValue, get as fbGet, remove, onD
 import Home from './components/Home';
 import Room from './components/Room';
 import { useWebRTC } from './hooks/useWebRTC';
+import { useDriveAuth } from './hooks/useDriveAuth';
+import { useDriveVideo } from './hooks/useDriveVideo';
+
+// Import adapters
+import { createYouTubeAdapter } from './adapters/YouTubeAdapter';
+import { createHTML5Adapter } from './adapters/HTML5Adapter';
 
 // Initialize Firebase
 const firebaseConfig = {
@@ -152,10 +158,13 @@ const WatchPartyApp = () => {
   const [vidSrc, setVidSrc] = useState('youtube');
   const [lastHostRoom, setLastHostRoom] = useState(null);
   const [ytReady, setYtReady] = useState(false);
-  
+  // Drive: whether iOS needs a tap to unlock playback for this member.
+  const [driveTapNeeded, setDriveTapNeeded] = useState(false);
+
   // All refs
   const containerRef = useRef(null);
   const lastMsgRef = useRef(null);
+  // playerRef now holds a MediaAdapter instance (not a raw YT.Player).
   const playerRef = useRef(null);
   const isHost = useRef(false);
   const roomListener = useRef(null);
@@ -173,7 +182,7 @@ const WatchPartyApp = () => {
   // member reconciliation interval) never read stale room data.
   const roomRef = useRef(null);
   // Member-only 5-second local reconciliation interval.
-  // Zero Firebase operations — local YouTube commands only.
+  // Zero Firebase operations — local player commands only.
   const memberSyncInt = useRef(null);
   // Phase 5: host-session presence refs.
   // hostSessionRef     — Firebase ref for the currently active host session node.
@@ -182,14 +191,34 @@ const WatchPartyApp = () => {
   // that each Firebase connection lifecycle is independently scoped.
   const hostSessionRef = useRef(null);
   const hostSessionIdLocal = useRef(null);
+  // Ref to the <video> element used for Drive HTML5 playback.
+  const driveVideoRef = useRef(null);
 
   // Keep roomRef synchronized with the latest room state on every render.
   // This breaks stale closures in onReady callbacks and the reconciliation timer.
   roomRef.current = room;
 
-  // INTEGRATE WEBRTC HOOK
+  // INTEGRATE WEBRTC HOOK (Phase 5 — FROZEN, DO NOT MODIFY)
   const webRTC = useWebRTC(db, roomId, username, isHost.current, room);
   const { isSharing, amSharing, shareHost, startShare, stopShare, changeQuality, currentQuality, vidRef } = webRTC;
+
+  // Drive auth and video hooks
+  const driveAuth = useDriveAuth();
+  const { accessToken, isAuthorized, authError, authorize: authorizeGDrive } = driveAuth;
+
+  const driveVideo = useDriveVideo(() => {
+    // Called by useDriveVideo on 401 — clear token so UI prompts re-auth.
+    driveAuth.clearToken();
+  });
+  const {
+    blobUrl: driveBlobUrl,
+    metadata: driveMetadata,
+    loading: driveLoading,
+    progress: driveProgress,
+    error: driveError,
+    loadDriveVideo,
+    revokeBlobUrl: revokeDriveBlobUrl,
+  } = driveVideo;
 
   // Options
   const avOpts = [
@@ -302,8 +331,8 @@ const WatchPartyApp = () => {
             if (playerRef.current) {
               try {
                 syncMemberPlayerRefClock(playerRef.current, normalizedRoom, serverTimeOffset.current);
-                playerRef.current.seekTo(normalizedRoom.anchorTime, true);
-                playerRef.current.pauseVideo();
+                playerRef.current.seek(normalizedRoom.anchorTime);
+                playerRef.current.pause();
               } catch (err) {
                 console.error('[Phase 5] Failed to normalize the returning host player.', err);
                 return;
@@ -452,7 +481,8 @@ const WatchPartyApp = () => {
             setVideoId(rm.videoId);
             setVidSrc(rm.videoSource || 'youtube');
           }
-          if (!isHost.current && playerRef.current && vidSrc === 'youtube') {
+          // Sync member player for BOTH youtube and drive sources.
+          if (!isHost.current && playerRef.current) {
             // Phase 5: substitute frozen PAUSED room when host is disconnected
             // mid-PLAYING, so the sync function naturally pauses at P*.
             const effectiveRoom = getHostInterruptedFrozenRoom(rm) || rm;
@@ -467,101 +497,104 @@ const WatchPartyApp = () => {
     }
   }, [view, room?.id, videoId, vidSrc]);
 
-  // YouTube player setup
+  // visibilitychange recovery: re-sync the active adapter when the tab/app
+  // returns to the foreground. Particularly important for iOS Safari where
+  // background tabs can have timers throttled and video paused by the OS.
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) return;
+      if (!playerRef.current || !roomRef.current) return;
+      // Hosts are authoritative — they do not follow the room clock.
+      if (isHost.current) return;
+      // Apply the same interrupted-host / frozen-room substitution used by
+      // the onValue listener and the member reconciliation interval.
+      // This prevents a returning member from advancing past the frozen P*
+      // after a host disappearance.
+      const effectiveRoom = getHostInterruptedFrozenRoom(roomRef.current) || roomRef.current;
+      syncMemberPlayerRefClock(playerRef.current, effectiveRoom, serverTimeOffset.current);
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, []);
+
+  // YouTube adapter setup
   useEffect(() => {
     if (videoId && ytReady && window.YT && window.YT.Player && vidSrc === 'youtube') {
+      // Destroy previous adapter (YouTube or Drive) before creating a new one.
       if (playerRef.current) {
         playerRef.current.destroy();
         playerRef.current = null;
       }
+      setDriveTapNeeded(false);
       const c = document.getElementById('yt-player');
-      if (!c) {
-        return;
-      }
-      const p = new window.YT.Player('yt-player', {
-        videoId: videoId,
-        playerVars: { 
-          controls: 1, 
-          disablekb: 0, 
-          modestbranding: 1, 
-          rel: 0, 
-          enablejsapi: 1,
-          origin: window.location.origin,
-          playsinline: 1 // iOS fix
-        },
-        events: {
-          onReady: (e) => {
-            playerRef.current = e.target;
-            setPlayer(e.target);
-            setTimeout(() => {
-              if (isHost.current) {
-                // A returning host must never sync from a stale PLAYING room.
-                // Use the frozen local interpretation while interrupted, and
-                // let the reconnect path publish the normalized room first.
-                const hostRoom = roomRef.current;
-                const effectiveHostRoom = getHostInterruptedFrozenRoom(hostRoom) || hostRoom;
-                if (effectiveHostRoom && (!isNormalizingRef.current || effectiveHostRoom.playbackState !== 'PLAYING')) {
-                  syncMemberPlayerRefClock(e.target, effectiveHostRoom, serverTimeOffset.current);
-                }
-              } else if (roomRef.current) {
-                // Initial member sync using ref (avoids stale closure).
-                const effectiveRoomOnReady = getHostInterruptedFrozenRoom(roomRef.current) || roomRef.current;
-                syncMemberPlayerRefClock(e.target, effectiveRoomOnReady, serverTimeOffset.current);
-                // Start local-only reconciliation timer.
-                // Catches silent drift (tab throttling, YouTube anomalies) without
-                // any Firebase reads or writes.
-                if (memberSyncInt.current) clearInterval(memberSyncInt.current);
-                memberSyncInt.current = setInterval(() => {
-                  if (playerRef.current && roomRef.current && !isHost.current) {
-                    const effectiveRoomInterval = getHostInterruptedFrozenRoom(roomRef.current) || roomRef.current;
-                    syncMemberPlayerRefClock(playerRef.current, effectiveRoomInterval, serverTimeOffset.current);
-                  }
-                }, 5000);
-              }
-            }, 500);
-          },
-          onStateChange: async (e) => {
-            if (!isHost.current) return;
-            // Ignore every YouTube event caused by reconnect normalization.
-            // This includes buffer recovery, seek-induced pause, and transient
-            // events that could otherwise publish the stale local position.
-            if (isNormalizingRef.current) return;
-            // Ignore transient states: BUFFERING(3), CUED(5), UNSTARTED(-1).
-            // Buffering is a local condition and must not pause the room.
-            const state = e.data;
-            if (state !== 0 && state !== 1 && state !== 2) return;
-            // Suppress the duplicate event that follows a togglePlay write.
-            if (suppressNextStateChange.current) {
-              suppressNextStateChange.current = false;
-              // Cancel the fallback timeout — event arrived before it fired.
-              if (suppressTimeoutRef.current) {
-                clearTimeout(suppressTimeoutRef.current);
-                suppressTimeoutRef.current = null;
-              }
-              return;
+      if (!c) return;
+
+      const adapter = createYouTubeAdapter('yt-player', videoId);
+
+      adapter.onReady(() => {
+        playerRef.current = adapter;
+        setPlayer(adapter);
+        setTimeout(() => {
+          if (isHost.current) {
+            // A returning host must never sync from a stale PLAYING room.
+            const hostRoom = roomRef.current;
+            const effectiveHostRoom = getHostInterruptedFrozenRoom(hostRoom) || hostRoom;
+            if (effectiveHostRoom && (!isNormalizingRef.current || effectiveHostRoom.playbackState !== 'PLAYING')) {
+              syncMemberPlayerRefClock(adapter, effectiveHostRoom, serverTimeOffset.current);
             }
-            const activeRoom = roomRef.current;
-            if (activeRoom) {
-              try {
-                const t = e.target.getCurrentTime();
-                // ENDED(0) → represent as PAUSED at the final position.
-                // PLAYING(1) → new anchor at current position.
-                // PAUSED(2) → anchor at current position.
-                const isPlaying = state === 1;
-                const playbackState = isPlaying ? 'PLAYING' : 'PAUSED';
-                await update(ref(db, '/rooms/' + activeRoom.id), {
-                  // Reference-clock fields
-                  playbackState,
-                  anchorTime: t,
-                  updatedAt: serverTimestamp(),
-                  // Legacy fields — kept for member compat until Phase 3 is live
-                  isPlaying,
-                  currentTime: t
-                });
-              } catch (err) {}
-            }
+          } else if (roomRef.current) {
+            // Initial member sync using ref (avoids stale closure).
+            const effectiveRoomOnReady = getHostInterruptedFrozenRoom(roomRef.current) || roomRef.current;
+            syncMemberPlayerRefClock(adapter, effectiveRoomOnReady, serverTimeOffset.current);
+            // Start local-only reconciliation timer.
+            if (memberSyncInt.current) clearInterval(memberSyncInt.current);
+            memberSyncInt.current = setInterval(() => {
+              if (playerRef.current && roomRef.current && !isHost.current) {
+                const effectiveRoomInterval = getHostInterruptedFrozenRoom(roomRef.current) || roomRef.current;
+                syncMemberPlayerRefClock(playerRef.current, effectiveRoomInterval, serverTimeOffset.current);
+              }
+            }, 5000);
           }
+        }, 500);
+      });
+
+      adapter.onStateChange(async (stateName) => {
+        if (!isHost.current) return;
+        // Ignore every YouTube event caused by reconnect normalization.
+        if (isNormalizingRef.current) return;
+        // Suppress the duplicate event that follows a togglePlay write.
+        if (suppressNextStateChange.current) {
+          suppressNextStateChange.current = false;
+          if (suppressTimeoutRef.current) {
+            clearTimeout(suppressTimeoutRef.current);
+            suppressTimeoutRef.current = null;
+          }
+          return;
         }
+        const activeRoom = roomRef.current;
+        if (activeRoom) {
+          try {
+            const t = adapter.getCurrentTime();
+            // ENDED → represent as PAUSED at the final position.
+            // PLAYING → new anchor at current position.
+            // PAUSED  → anchor at current position.
+            const isPlaying = stateName === 'PLAYING';
+            const playbackState = isPlaying ? 'PLAYING' : 'PAUSED';
+            await update(ref(db, '/rooms/' + activeRoom.id), {
+              // Reference-clock fields
+              playbackState,
+              anchorTime: t,
+              updatedAt: serverTimestamp(),
+              // Legacy fields — kept for member compat
+              isPlaying,
+              currentTime: t
+            });
+          } catch (err) {}
+        }
+      });
+
+      adapter.onError((e) => {
+        console.error('[YouTube] Player error:', e);
       });
     }
     return () => {
@@ -570,13 +603,116 @@ const WatchPartyApp = () => {
         memberSyncInt.current = null;
       }
       if (playerRef.current && vidSrc === 'youtube') {
-        try {
-          playerRef.current.destroy();
-        } catch (e) {}
+        try { playerRef.current.destroy(); } catch (e) {}
         playerRef.current = null;
       }
     };
   }, [videoId, vidSrc, ytReady]);
+
+  // Drive HTML5 adapter setup — runs when the Drive blob URL becomes available.
+  useEffect(() => {
+    if (vidSrc !== 'drive' || !driveBlobUrl || !driveVideoRef.current) return;
+
+    // Destroy any existing adapter (e.g. a previous Drive load).
+    if (playerRef.current) {
+      playerRef.current.destroy();
+      playerRef.current = null;
+    }
+    setDriveTapNeeded(false);
+
+    const videoEl = driveVideoRef.current;
+    const adapter = createHTML5Adapter(videoEl, driveBlobUrl);
+
+    adapter.onReady(() => {
+      playerRef.current = adapter;
+      setPlayer(adapter);
+
+      if (isHost.current) {
+        // Host: sync from effective room state (same pattern as YouTube).
+        const hostRoom = roomRef.current;
+        const effectiveHostRoom = getHostInterruptedFrozenRoom(hostRoom) || hostRoom;
+        if (effectiveHostRoom && (!isNormalizingRef.current || effectiveHostRoom.playbackState !== 'PLAYING')) {
+          syncMemberPlayerRefClock(adapter, effectiveHostRoom, serverTimeOffset.current);
+        }
+      } else if (roomRef.current) {
+        // Member: attempt immediate sync; iOS may block the play() call.
+        const effectiveRoom = getHostInterruptedFrozenRoom(roomRef.current) || roomRef.current;
+        syncMemberPlayerRefClock(adapter, effectiveRoom, serverTimeOffset.current);
+        // Start reconciliation interval.
+        if (memberSyncInt.current) clearInterval(memberSyncInt.current);
+        memberSyncInt.current = setInterval(() => {
+          if (playerRef.current && roomRef.current && !isHost.current) {
+            const effectiveRoomInterval = getHostInterruptedFrozenRoom(roomRef.current) || roomRef.current;
+            syncMemberPlayerRefClock(playerRef.current, effectiveRoomInterval, serverTimeOffset.current);
+          }
+        }, 5000);
+      }
+    });
+
+    adapter.onStateChange(async (stateName) => {
+      if (!isHost.current) return;
+      if (isNormalizingRef.current) return;
+      if (suppressNextStateChange.current) {
+        suppressNextStateChange.current = false;
+        if (suppressTimeoutRef.current) {
+          clearTimeout(suppressTimeoutRef.current);
+          suppressTimeoutRef.current = null;
+        }
+        return;
+      }
+      const activeRoom = roomRef.current;
+      if (activeRoom) {
+        try {
+          const t = adapter.getCurrentTime();
+          const isPlaying = stateName === 'PLAYING';
+          const playbackState = isPlaying ? 'PLAYING' : 'PAUSED';
+          await update(ref(db, '/rooms/' + activeRoom.id), {
+            playbackState,
+            anchorTime: t,
+            updatedAt: serverTimestamp(),
+            isPlaying,
+            currentTime: t
+          });
+        } catch (err) {}
+      }
+    });
+
+    adapter.onError((mediaError) => {
+      console.error('[Drive HTML5] Video error:', mediaError);
+    });
+
+    return () => {
+      if (memberSyncInt.current) {
+        clearInterval(memberSyncInt.current);
+        memberSyncInt.current = null;
+      }
+      // Do NOT destroy the adapter here — the adapter lifecycle is managed by
+      // videoId/vidSrc changes and leave(). Destroying on blobUrl change
+      // would remove listeners before the component unmounts.
+    };
+  }, [vidSrc, driveBlobUrl]);
+
+  // When videoId changes to a new Drive video, trigger the Blob download
+  // (if the access token is available).
+  useEffect(() => {
+    if (vidSrc === 'drive' && videoId && accessToken) {
+      loadDriveVideo(videoId, accessToken);
+    }
+  }, [vidSrc, videoId, accessToken]);
+
+  // Fix 3: Drive → non-Drive cleanup.
+  // When vidSrc transitions away from 'drive' (e.g. host switches to YouTube),
+  // cancel any active download and revoke the Blob/ObjectURL so no stale
+  // memory or state remains. The Drive→Drive reload path is unaffected because
+  // that useEffect above handles it before vidSrc changes.
+  const prevVidSrcRef = useRef(vidSrc);
+  useEffect(() => {
+    const prev = prevVidSrcRef.current;
+    prevVidSrcRef.current = vidSrc;
+    if (prev === 'drive' && vidSrc !== 'drive') {
+      revokeDriveBlobUrl();
+    }
+  }, [vidSrc]);
 
   // Floating messages
   useEffect(() => {
@@ -703,24 +839,29 @@ const WatchPartyApp = () => {
     setLoading(false);
   };
   
-  const syncMemberPlayer = (p, currentRoom) => {
-    if (!p || !currentRoom) return;
+  // Legacy member sync (pre-Phase-2 rooms without reference-clock fields).
+  // Uses adapter methods instead of direct YT API.
+  const syncMemberPlayer = (adapter, currentRoom) => {
+    if (!adapter || !currentRoom) return;
     try {
-      const st = p.getPlayerState();
-      if (st === -1 || st === 5) return;
-      const ct = p.getCurrentTime();
+      const st = adapter.getState();
+      if (st === 'UNSTARTED' || st === 'CUED') return;
+      const ct = adapter.getCurrentTime();
       const tt = currentRoom.currentTime || 0;
       const diff = Math.abs(ct - tt);
       if (diff > 1) {
-        p.seekTo(tt, true);
+        adapter.seek(tt);
       }
       const shouldPlay = currentRoom.isPlaying;
-      const isPlaying = st === 1;
-      const isBuffering = st === 3;
+      const isPlaying = st === 'PLAYING';
+      const isBuffering = st === 'BUFFERING';
       if (shouldPlay && !isPlaying && !isBuffering) {
-        p.playVideo();
+        const p = adapter.play();
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => setDriveTapNeeded(true));
+        }
       } else if (!shouldPlay && isPlaying) {
-        p.pauseVideo();
+        adapter.pause();
       }
     } catch (e) {}
   };
@@ -730,57 +871,56 @@ const WatchPartyApp = () => {
    * Falls back to the legacy syncMemberPlayer when reference-clock data is
    * missing (pre-Phase-2 rooms) or not yet populated.
    *
+   * For Drive HTML5 video on iOS:
+   *   - Attempt play() normally.
+   *   - If Safari rejects the call (Promise rejects), expose Tap-to-Sync UX.
+   *
    * Buffering rules:
-   *   PLAYING + buffering  → do not fight buffer; YouTube will resume naturally.
-   *   PAUSED  + buffering  → force pause; prevents member auto-playing after buffer.
+   *   PLAYING + buffering  → do not fight buffer; player will resume naturally.
+   *   PAUSED  + buffering  → force pause; prevents auto-playing after buffer.
    */
-  const syncMemberPlayerRefClock = (player, currentRoom, offset) => {
-    if (!player || !currentRoom) return;
+  const syncMemberPlayerRefClock = (adapter, currentRoom, offset) => {
+    if (!adapter || !currentRoom) return;
     try {
-      const st = player.getPlayerState();
-      // UNSTARTED (-1): player not initialised — cannot issue any commands.
-      // CUED (5): player is ready but hasn't started; allow reference-clock
-      // calculation so late joiners can seek to the correct position.
-      if (st === -1) return;
+      const st = adapter.getState();
+      // UNSTARTED: adapter not initialised — cannot issue any commands.
+      if (st === 'UNSTARTED') return;
 
       const expected = getExpectedPosition(currentRoom, offset);
 
       // Reference clock not valid → use legacy sync as migration fallback
       if (expected === null) {
-        syncMemberPlayer(player, currentRoom);
+        syncMemberPlayer(adapter, currentRoom);
         return;
       }
 
       const shouldPlay = currentRoom.playbackState === 'PLAYING';
-      const ct = player.getCurrentTime();
+      const ct = adapter.getCurrentTime();
       const drift = Math.abs(ct - expected);
 
       // Hard seek when drift exceeds 2-second threshold
       if (drift >= 2) {
-        player.seekTo(expected, true);
+        adapter.seek(expected);
       }
 
-      const isPlaying = st === 1;
-      const isBuffering = st === 3;
+      const isPlaying = st === 'PLAYING';
+      const isBuffering = st === 'BUFFERING';
 
-      // PLAYING room + buffering → let YouTube resolve buffer naturally.
-      // PLAYING room + CUED → st===5: isPlaying=false, isBuffering=false,
-      // so playVideo() is called here, starting the video at the seeked position.
+      // PLAYING room + buffering → let the player resolve buffer naturally.
       if (shouldPlay && !isPlaying && !isBuffering) {
-        player.playVideo();
-      // PAUSED room + playing, buffering, OR cued → force pause.
-      // The st===5 (CUED) case is required: without it, seekTo() from CUED
-      // state leaves the player ready-to-play; not calling pauseVideo() here
-      // would allow it to start automatically after the seek resolves.
-      } else if (!shouldPlay && (isPlaying || isBuffering || st === 5)) {
-        player.pauseVideo();
+        const p = adapter.play();
+        // HTML5Adapter.play() returns a Promise. YouTube adapter returns void.
+        // On iOS, if play() is rejected (autoplay policy), show Tap-to-Sync.
+        if (p && typeof p.catch === 'function') {
+          p.catch(() => {
+            setDriveTapNeeded(true);
+          });
+        }
+      } else if (!shouldPlay && (isPlaying || isBuffering || st === 'CUED')) {
+        adapter.pause();
       }
     } catch (e) {}
   };
-
-  // startHostSync removed in Phase 4.
-  // The 500ms legacy heartbeat only wrote isPlaying/currentTime.
-  // Reference-clock writes are now fully event-driven via onStateChange and togglePlay.
 
   const copy = () => { 
     if (navigator.clipboard) {
@@ -821,6 +961,26 @@ const WatchPartyApp = () => {
     }
     
     if (vid && room) {
+      // If switching to Drive and not yet authorized, prompt auth first.
+      if (src === 'drive' && !isAuthorized) {
+        try {
+          await authorizeGDrive();
+        } catch (err) {
+          alert('Google Drive authorization failed. Please try again.');
+          return;
+        }
+      }
+
+      // Destroy existing adapter and revoke any Drive blob before switching.
+      if (playerRef.current) {
+        playerRef.current.destroy();
+        playerRef.current = null;
+      }
+      if (vidSrc === 'drive' || src === 'drive') {
+        revokeDriveBlobUrl();
+      }
+      setDriveTapNeeded(false);
+
       await update(ref(db, '/rooms/' + room.id), {
         videoId: vid,
         videoSource: src,
@@ -849,44 +1009,126 @@ const WatchPartyApp = () => {
 
   const togglePlay = async () => {
     if (isNormalizingRef.current) return;
-    if (!room || vidSrc !== 'youtube' || !playerRef.current) return;
+    if (!room || !playerRef.current) return;
+    const adapter = playerRef.current;
+
     // Use reference-clock field — not the legacy isPlaying field — to determine
     // the toggled state. isPlaying is kept for schema compatibility only.
     const playing = room.playbackState !== 'PLAYING';
     let t = 0;
     try {
-      t = playerRef.current.getCurrentTime();
-      // Publish the authoritative Firebase transition FIRST.
-      // The suppression flag is armed AFTER the await so that the Firebase
-      // network round-trip is NOT inside the suppression window. Any YouTube
-      // events arriving during the await are legitimate and must not be swallowed.
-      await update(ref(db, '/rooms/' + room.id), {
-        // Reference-clock fields
-        playbackState: playing ? 'PLAYING' : 'PAUSED',
-        anchorTime: t,
-        updatedAt: serverTimestamp(),
-        // Legacy fields
-        isPlaying: playing,
-        currentTime: t
-      });
-      // Arm suppression immediately before calling the player so only the
-      // single onStateChange that follows this call is suppressed.
-      if (suppressTimeoutRef.current) clearTimeout(suppressTimeoutRef.current);
-      suppressNextStateChange.current = true;
-      suppressTimeoutRef.current = setTimeout(() => {
-        // Fallback: if YouTube never emits the expected state event (e.g. player
-        // was already in that state), clear the flag so the next genuine event
-        // is not accidentally swallowed.
-        suppressNextStateChange.current = false;
-        suppressTimeoutRef.current = null;
-      }, 1000);
-      if (playing) playerRef.current.playVideo();
-      else playerRef.current.pauseVideo();
+      t = adapter.getCurrentTime();
+
+      if (vidSrc === 'drive') {
+        // For HTML5 Drive on iOS: call adapter.play() FIRST (synchronously
+        // from the gesture handler) to preserve the user-gesture context,
+        // then write Firebase. We await the play() Promise so we only
+        // publish PLAYING when play actually succeeds.
+        //
+        // Arm suppression before the command so the resulting onStateChange
+        // is suppressed.
+        if (suppressTimeoutRef.current) clearTimeout(suppressTimeoutRef.current);
+        suppressNextStateChange.current = true;
+        suppressTimeoutRef.current = setTimeout(() => {
+          suppressNextStateChange.current = false;
+          suppressTimeoutRef.current = null;
+        }, 1000);
+
+        // Resolved state: what we will actually publish to Firebase.
+        // Default to PAUSED in case play() is not called or rejects.
+        let resolvedPlaying = playing;
+
+        if (playing) {
+          setDriveTapNeeded(false); // hide tap overlay — gesture is in progress
+          try {
+            const p = adapter.play();
+            // HTML5Adapter returns a Promise; await it so we know if Safari
+            // accepted the play call before we publish PLAYING.
+            if (p && typeof p.then === 'function') {
+              await p;
+              // play() resolved — PLAYING is confirmed.
+            }
+            // If adapter.play() returned void (non-Promise), treat as success.
+          } catch {
+            // play() rejected (iOS autoplay policy or element error).
+            // Clear suppression so the next genuine state event is not lost.
+            suppressNextStateChange.current = false;
+            if (suppressTimeoutRef.current) {
+              clearTimeout(suppressTimeoutRef.current);
+              suppressTimeoutRef.current = null;
+            }
+            setDriveTapNeeded(true);
+            // Do not publish PLAYING — fall back to PAUSED.
+            resolvedPlaying = false;
+          }
+        } else {
+          adapter.pause();
+        }
+
+        // Firebase write follows asynchronously (gesture context already used).
+        await update(ref(db, '/rooms/' + room.id), {
+          playbackState: resolvedPlaying ? 'PLAYING' : 'PAUSED',
+          anchorTime: t,
+          updatedAt: serverTimestamp(),
+          isPlaying: resolvedPlaying,
+          currentTime: t
+        });
+      } else {
+        // YouTube: write Firebase first, then call the adapter command.
+        // This is the original Phase 4 ordering which is correct for YouTube
+        // (the YouTube iframe handles gesture context internally).
+        await update(ref(db, '/rooms/' + room.id), {
+          playbackState: playing ? 'PLAYING' : 'PAUSED',
+          anchorTime: t,
+          updatedAt: serverTimestamp(),
+          isPlaying: playing,
+          currentTime: t
+        });
+        // Arm suppression immediately before calling the player so only the
+        // single onStateChange that follows this call is suppressed.
+        if (suppressTimeoutRef.current) clearTimeout(suppressTimeoutRef.current);
+        suppressNextStateChange.current = true;
+        suppressTimeoutRef.current = setTimeout(() => {
+          suppressNextStateChange.current = false;
+          suppressTimeoutRef.current = null;
+        }, 1000);
+        if (playing) adapter.play();
+        else adapter.pause();
+      }
     } catch (e) {
       // Write or player call failed — clear suppression so no future event is lost.
       if (suppressTimeoutRef.current) clearTimeout(suppressTimeoutRef.current);
       suppressTimeoutRef.current = null;
       suppressNextStateChange.current = false;
+    }
+  };
+
+  /**
+   * Tap-to-Sync handler for iOS members.
+   *
+   * Called from user gesture (tap). Attempts to unlock the video element for
+   * programmatic play/pause. After the initial gesture-initiated call, Safari
+   * allows subsequent programmatic calls without gesture requirement.
+   */
+  const onDriveTapToSync = () => {
+    setDriveTapNeeded(false);
+    if (!playerRef.current || !roomRef.current) return;
+    const adapter = playerRef.current;
+    const currentRoom = roomRef.current;
+    const effectiveRoom = getHostInterruptedFrozenRoom(currentRoom) || currentRoom;
+    const expected = getExpectedPosition(effectiveRoom, serverTimeOffset.current);
+    if (expected !== null) {
+      adapter.seek(expected);
+    }
+    if (effectiveRoom.playbackState === 'PLAYING') {
+      const p = adapter.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(() => {
+          // Still blocked — leave the overlay hidden; user will try again.
+        });
+      }
+    } else {
+      adapter.pause();
     }
   };
 
@@ -926,8 +1168,6 @@ const WatchPartyApp = () => {
       // doesn't fire redundantly after the connection closes.
       if (hostSessionRef.current) {
         try {
-          // Cancel the server-side onDisconnect (best-effort — may fail if
-          // the connection is already closing, in which case it fires harmlessly).
           await onDisconnect(hostSessionRef.current).cancel();
         } catch (_) {}
         try {
@@ -952,7 +1192,14 @@ const WatchPartyApp = () => {
       } catch (e) {}
     }
     
-    if (playerRef.current) { playerRef.current.destroy(); playerRef.current = null; }
+    // Destroy adapter (revokes Drive ObjectURL if applicable).
+    if (playerRef.current) {
+      try { playerRef.current.destroy(); } catch (e) {}
+      playerRef.current = null;
+    }
+    // Revoke any pending Drive blob URL from the hook's ref as well.
+    revokeDriveBlobUrl();
+
     if (memberSyncInt.current) { clearInterval(memberSyncInt.current); memberSyncInt.current = null; }
     if (roomListener.current) roomListener.current();
     
@@ -967,6 +1214,7 @@ const WatchPartyApp = () => {
     setParticipants([]);
     setVideoId(null);
     setPlayer(null);
+    setDriveTapNeeded(false);
     isHost.current = false;
   };
 
@@ -993,6 +1241,7 @@ const WatchPartyApp = () => {
     <Room
       containerRef={containerRef}
       vidRef={vidRef}
+      driveVideoRef={driveVideoRef}
       room={room}
       isHost={isHost.current}
       participants={participants}
@@ -1017,6 +1266,16 @@ const WatchPartyApp = () => {
       amSharing={amSharing}
       changeQuality={changeQuality}
       currentQuality={currentQuality}
+      // Drive-specific props
+      isAuthorized={isAuthorized}
+      onAuthorize={authorizeGDrive}
+      authError={authError}
+      driveLoading={driveLoading}
+      driveProgress={driveProgress}
+      driveError={driveError}
+      driveMetadata={driveMetadata}
+      driveTapNeeded={driveTapNeeded}
+      onDriveTapToSync={onDriveTapToSync}
     />
   );
 };

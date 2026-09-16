@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { Video, Users, MessageSquare, Youtube, Monitor, Copy, Check, X, Send, Maximize, Minimize, Volume2, VolumeX, Settings } from 'lucide-react';
+import { Video, Users, MessageSquare, Youtube, Monitor, Copy, Check, X, Send, Maximize, Minimize, Volume2, VolumeX, Settings, HardDrive, AlertTriangle } from 'lucide-react';
 
 export default function Room(props) {
   const {
     containerRef,
     vidRef,
+    driveVideoRef,
     room,
     isHost,
     participants,
@@ -29,7 +30,17 @@ export default function Room(props) {
     // WebRTC props
     amSharing,
     changeQuality,
-    currentQuality
+    currentQuality,
+    // Drive-specific props
+    isAuthorized,
+    onAuthorize,
+    authError,
+    driveLoading,
+    driveProgress,
+    driveError,
+    driveMetadata,
+    driveTapNeeded,
+    onDriveTapToSync,
   } = props;
 
   // Local state for controls
@@ -56,6 +67,17 @@ export default function Room(props) {
     'high': '1080p',
     'auto': 'Auto'
   };
+
+  // Whether a Drive video is actively loading (downloading Blob).
+  const isDriveLoading = vidSrc === 'drive' && driveLoading;
+  // Whether Drive video is loaded and ready.
+  const isDriveReady = vidSrc === 'drive' && videoId && !driveLoading && !driveError;
+  // Warn if the file is not a standard mp4 or webm but still proceed.
+  const driveFormatWarning =
+    driveMetadata?.mimeType &&
+    !driveMetadata.mimeType.includes('mp4') &&
+    !driveMetadata.mimeType.includes('webm') &&
+    driveMetadata.mimeType.startsWith('video/');
 
   return (
     <div className="fixed inset-0 bg-gray-900 flex flex-col">
@@ -103,15 +125,82 @@ export default function Room(props) {
             style={{ display: (videoId && vidSrc === 'youtube' && !room?.isSharing) ? 'block' : 'none' }}
           ></div>
 
-          {/* Google Drive player - RESTORED OLD VERSION */}
-          {videoId && vidSrc === 'drive' && !room?.isSharing && (
-            <iframe 
-              src={`https://drive.google.com/file/d/${videoId}/preview`} 
-              className="w-full h-full" 
-              allow="autoplay"
-              allowFullScreen
-              style={{ border: 'none' }}
-            />
+          {/* Google Drive — HTML5 <video> (replaces the old iframe) */}
+          {/*
+            playsInline + webkit-playsinline are required for iOS Safari to
+            prevent automatic fullscreen on play.
+            controls={false}: host-controlled seek bar deferred to a later phase;
+            avoids native seek bar / reference-clock feedback conflicts.
+          */}
+          <video
+            ref={driveVideoRef}
+            playsInline
+            webkit-playsinline="true"
+            className="w-full h-full object-contain bg-black"
+            style={{
+              display: (videoId && vidSrc === 'drive' && !room?.isSharing) ? 'block' : 'none',
+              maxWidth: '100%',
+              maxHeight: '100%',
+            }}
+          />
+
+          {/* Drive: Blob download in progress */}
+          {isDriveLoading && !room?.isSharing && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-20">
+              <HardDrive className="w-12 h-12 text-purple-400 mb-4 animate-pulse" />
+              <p className="text-white text-sm mb-3">Downloading video…</p>
+              {/* Progress bar */}
+              <div className="w-64 bg-gray-700 rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-purple-500 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${driveProgress}%` }}
+                />
+              </div>
+              <p className="text-gray-400 text-xs mt-2">{driveProgress}%</p>
+              {driveMetadata && (
+                <p className="text-gray-500 text-xs mt-1 max-w-xs text-center truncate">
+                  {driveMetadata.name}
+                  {driveMetadata.size ? ` · ${(Number(driveMetadata.size) / 1048576).toFixed(1)} MB` : ''}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Drive: error during download or playback */}
+          {driveError && !room?.isSharing && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-20 p-4">
+              <AlertTriangle className="w-12 h-12 text-red-400 mb-4" />
+              <p className="text-red-300 text-sm text-center max-w-xs">{driveError}</p>
+            </div>
+          )}
+
+          {/* Drive: format warning banner */}
+          {driveFormatWarning && isDriveReady && !room?.isSharing && (
+            <div className="absolute top-2 left-2 right-2 bg-yellow-800/80 backdrop-blur-sm text-yellow-200 text-xs px-3 py-2 rounded-lg z-10 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+              <span>Format ({driveMetadata.mimeType}) may not play in all browsers. If you see an error, re-encode to MP4/H.264.</span>
+            </div>
+          )}
+
+          {/* Drive: large file warning (non-blocking) */}
+          {driveMetadata?.size && Number(driveMetadata.size) > 524288000 && isDriveLoading && !room?.isSharing && (
+            <p className="absolute bottom-8 left-0 right-0 text-center text-yellow-400 text-xs px-4 z-20">
+              Large file — download may take a while and use significant memory on mobile.
+            </p>
+          )}
+
+          {/* Drive: Tap-to-Sync overlay for iOS members */}
+          {driveTapNeeded && vidSrc === 'drive' && !isHost && !room?.isSharing && (
+            <div
+              className="absolute inset-0 flex items-center justify-center bg-black/60 z-30 cursor-pointer"
+              onClick={onDriveTapToSync}
+            >
+              <div className="text-center px-6 py-8 bg-black/50 rounded-2xl backdrop-blur-sm">
+                <HardDrive className="w-12 h-12 text-purple-400 mx-auto mb-3" />
+                <p className="text-white text-xl font-semibold mb-1">Tap to Sync</p>
+                <p className="text-gray-300 text-sm">Tap to start synchronized playback</p>
+              </div>
+            </div>
           )}
 
           {/* Screen Share Video - iOS optimized WITHOUT permanent loading */}
@@ -217,7 +306,29 @@ export default function Room(props) {
         </div>
 
         {/* Controls Bar - Always visible at bottom */}
-                  <div className="bg-gray-800 p-3 border-t border-gray-700 flex-shrink-0">
+        <div className="bg-gray-800 p-3 border-t border-gray-700 flex-shrink-0">
+          {/* Drive auth prompt — shown to ALL participants when Drive is active but not yet authorized.
+               Every browser downloads the file using its own OAuth token (zero-backend architecture). */}
+          {vidSrc === 'drive' && !isAuthorized && !driveLoading && (
+            <div className="mb-3 flex items-center gap-3 bg-blue-900/40 border border-blue-700/40 rounded-lg px-3 py-2">
+              <HardDrive className="w-4 h-4 text-blue-400 flex-shrink-0" />
+              <span className="text-blue-200 text-xs flex-1">
+                {isHost
+                  ? 'Authorize Google Drive to load and play videos.'
+                  : 'Authorize Google Drive to watch this video in your browser.'}
+              </span>
+              <button
+                onClick={onAuthorize}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-xs font-semibold"
+              >
+                Authorize
+              </button>
+            </div>
+          )}
+          {/* Auth error */}
+          {authError && (
+            <p className="text-red-400 text-xs mb-2 px-1">{authError}</p>
+          )}
           <div className="flex flex-col sm:flex-row gap-2 mb-3">
             <input 
               type="text" 
@@ -243,10 +354,12 @@ export default function Room(props) {
                 <Monitor className="w-4 h-4" />
                 <span>{room?.isSharing ? 'Stop' : 'Share'}</span>
               </button>
-              {isHost && vidSrc === 'youtube' && !room?.isSharing && (
+              {/* Play/Pause: visible for both YouTube and Drive, host only */}
+              {isHost && (vidSrc === 'youtube' || vidSrc === 'drive') && !room?.isSharing && (
                 <button 
-                  onClick={togglePlay} 
-                  className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-sm"
+                  onClick={togglePlay}
+                  disabled={vidSrc === 'drive' && driveLoading}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {room?.playbackState === 'PLAYING' ? 'Pause' : 'Play'}
                 </button>
