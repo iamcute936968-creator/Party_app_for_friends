@@ -145,7 +145,7 @@ export function createHTML5Adapter(videoEl, blobUrl) {
     },
 
     // Lifecycle
-    destroy() {
+    destroy({ revokeObjectUrl = true } = {}) {
       if (destroyed) return;
       destroyed = true;
 
@@ -164,7 +164,7 @@ export function createHTML5Adapter(videoEl, blobUrl) {
       videoEl.load(); // Releases media resource per HTML spec.
 
       // Revoke the ObjectURL to free the Blob's memory.
-      if (blobUrl) {
+      if (revokeObjectUrl && blobUrl) {
         try { URL.revokeObjectURL(blobUrl); } catch { /* swallow */ }
       }
 

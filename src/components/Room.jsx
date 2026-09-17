@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Video, Users, MessageSquare, Youtube, Monitor, Copy, Check, X, Send, Maximize, Minimize, Volume2, VolumeX, Settings, HardDrive, AlertTriangle } from 'lucide-react';
+import DriveTimeline from './DriveTimeline';
 
 export default function Room(props) {
   const {
@@ -41,6 +42,9 @@ export default function Room(props) {
     driveMetadata,
     driveTapNeeded,
     onDriveTapToSync,
+    // Phase 6C: Drive timeline props
+    onDriveSeekStart,
+    onDriveSeekCommit,
   } = props;
 
   // Local state for controls
@@ -304,6 +308,17 @@ export default function Room(props) {
             {isFs ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
           </button>
         </div>
+
+        {/* Phase 6C: Drive Host Seek Timeline */}
+        {vidSrc === 'drive' && videoId && !room?.isSharing && (
+          <DriveTimeline
+            driveVideoRef={driveVideoRef}
+            isHost={isHost}
+            onSeekStart={onDriveSeekStart}
+            onSeekCommit={onDriveSeekCommit}
+            disabled={driveLoading}
+          />
+        )}
 
         {/* Controls Bar - Always visible at bottom */}
         <div className="bg-gray-800 p-3 border-t border-gray-700 flex-shrink-0">

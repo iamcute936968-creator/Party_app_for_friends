@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
 import { getDatabase, ref, set, push, update, onValue, get as fbGet, remove, onDisconnect, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js';
 
@@ -156,6 +156,7 @@ const WatchPartyApp = () => {
   const [floatMsgs, setFloatMsgs] = useState([]);
   const [player, setPlayer] = useState(null);
   const [vidSrc, setVidSrc] = useState('youtube');
+  const [driveMountGen, setDriveMountGen] = useState(0);
   const [lastHostRoom, setLastHostRoom] = useState(null);
   const [ytReady, setYtReady] = useState(false);
   // Drive: whether iOS needs a tap to unlock playback for this member.
@@ -193,6 +194,13 @@ const WatchPartyApp = () => {
   const hostSessionIdLocal = useRef(null);
   // Ref to the <video> element used for Drive HTML5 playback.
   const driveVideoRef = useRef(null);
+  // Phase 6C: Drive host seek timeline state.
+  // seekGenerationRef — monotonically increasing counter; each seek start
+  // increments it. Commit's finally and Firebase write only execute if
+  // generation matches. Prevents stale seeks from clobbering newer seeks.
+  const seekGenerationRef = useRef(0);
+  // Whether room was PLAYING when the current drag started.
+  const wasPlayingBeforeSeekRef = useRef(false);
 
   // Keep roomRef synchronized with the latest room state on every render.
   // This breaks stale closures in onReady callbacks and the reconciliation timer.
@@ -653,12 +661,23 @@ const WatchPartyApp = () => {
       if (!isHost.current) return;
       if (isNormalizingRef.current) return;
       if (suppressNextStateChange.current) {
+        // M-02: NEVER suppress ENDED — terminal state must always reach
+        // Firebase to prevent the reference clock from remaining PLAYING
+        // after the media has finished.
+        if (stateName !== 'ENDED') {
+          suppressNextStateChange.current = false;
+          if (suppressTimeoutRef.current) {
+            clearTimeout(suppressTimeoutRef.current);
+            suppressTimeoutRef.current = null;
+          }
+          return;
+        }
+        // ENDED: clear suppression and fall through to write Firebase.
         suppressNextStateChange.current = false;
         if (suppressTimeoutRef.current) {
           clearTimeout(suppressTimeoutRef.current);
           suppressTimeoutRef.current = null;
         }
-        return;
       }
       const activeRoom = roomRef.current;
       if (activeRoom) {
@@ -690,7 +709,7 @@ const WatchPartyApp = () => {
       // videoId/vidSrc changes and leave(). Destroying on blobUrl change
       // would remove listeners before the component unmounts.
     };
-  }, [vidSrc, driveBlobUrl]);
+  }, [vidSrc, driveBlobUrl, driveMountGen]);
 
   // When videoId changes to a new Drive video, trigger the Blob download
   // (if the access token is available).
@@ -948,8 +967,152 @@ const WatchPartyApp = () => {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // Phase 6C: Drive Host Seek Handlers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Called when the host begins dragging the timeline slider.
+   * Increments the seek generation to invalidate any older pending seek.
+   * Wrapped in useCallback so DriveTimeline's React.memo is effective (S-03).
+   */
+  const handleDriveSeekStart = useCallback((time) => {
+    ++seekGenerationRef.current;
+    const currentRoom = roomRef.current;
+    wasPlayingBeforeSeekRef.current = currentRoom?.playbackState === 'PLAYING';
+  }, []);
+
+  /**
+   * Called when the host releases the timeline slider.
+   * Follows the exact Phase 6B togglePlay pattern for play() await/catch.
+   * Uses seekGenerationRef for ownership — only the latest seek may
+   * write Firebase or clean up shared state.
+   *
+   * M-02: seek-to-end explicitly pauses and publishes PAUSED at duration.
+   * S-04: anchorTime is clamped to exact duration for seek-to-end.
+   * S-05: suppression armed before adapter commands, safely cleared on all paths.
+   */
+  const handleDriveSeekCommit = useCallback(async (time) => {
+    const myGeneration = seekGenerationRef.current;
+
+    // --- Input validation ---
+    const adapter = playerRef.current;
+    if (!adapter) {
+      if (seekGenerationRef.current === myGeneration) {
+        wasPlayingBeforeSeekRef.current = false;
+      }
+      return;
+    }
+    const duration = adapter.getDuration();
+    if (!Number.isFinite(time) || !Number.isFinite(duration) || duration <= 0) {
+      if (seekGenerationRef.current === myGeneration) {
+        wasPlayingBeforeSeekRef.current = false;
+      }
+      return;
+    }
+    let finalPos = Math.max(0, Math.min(time, duration));
+
+    // --- Snapshot identity for staleness detection ---
+    const snapshotVidSrc = vidSrc;
+    const snapshotVideoId = videoId;
+    const snapshotAdapter = adapter;
+
+    // --- Seek-to-end detection (S-04) ---
+    const isAtEnd = finalPos >= duration - 0.5;
+    if (isAtEnd) {
+      finalPos = duration; // Clamp to exact terminal position.
+    }
+
+    try {
+      // Pre-commit guards
+      if (!playerRef.current || !roomRef.current || !isHost.current) return;
+      if (isLeavingRef.current || isNormalizingRef.current) return;
+
+      const wasPlaying = wasPlayingBeforeSeekRef.current && !isAtEnd;
+
+      // Seek the video element to the final position (exactly once).
+      adapter.seek(finalPos);
+
+      // Determine resolved playback state.
+      let resolvedPlaying = false;
+
+      if (isAtEnd && wasPlayingBeforeSeekRef.current) {
+        // S-04: Video was playing but we're seeking to the end.
+        // Explicitly pause to prevent the video from reaching 'ended'
+        // while Firebase shows PLAYING. Arm suppression BEFORE the
+        // pause command to absorb the expected PAUSED event (S-05).
+        if (suppressTimeoutRef.current) clearTimeout(suppressTimeoutRef.current);
+        suppressNextStateChange.current = true;
+        suppressTimeoutRef.current = setTimeout(() => {
+          suppressNextStateChange.current = false;
+          suppressTimeoutRef.current = null;
+        }, 1000);
+        adapter.pause();
+        // resolvedPlaying remains false — publish PAUSED at duration.
+      } else if (wasPlaying) {
+        // ARM SUPPRESSION — exact Phase 6B pattern (S-05: before play).
+        if (suppressTimeoutRef.current) clearTimeout(suppressTimeoutRef.current);
+        suppressNextStateChange.current = true;
+        suppressTimeoutRef.current = setTimeout(() => {
+          suppressNextStateChange.current = false;
+          suppressTimeoutRef.current = null;
+        }, 1000);
+
+        setDriveTapNeeded(false);
+        try {
+          const p = adapter.play();
+          if (p && typeof p.then === 'function') {
+            await p;
+          }
+          // play() succeeded.
+          resolvedPlaying = true;
+        } catch {
+          // play() rejected — iOS autoplay or element error.
+          suppressNextStateChange.current = false;
+          if (suppressTimeoutRef.current) {
+            clearTimeout(suppressTimeoutRef.current);
+            suppressTimeoutRef.current = null;
+          }
+          setDriveTapNeeded(true);
+          resolvedPlaying = false;
+        }
+      }
+      // If was paused (and not isAtEnd): video remains paused at finalPos.
+
+      // --- Generation + staleness check before Firebase write ---
+      if (seekGenerationRef.current !== myGeneration) return;
+      if (vidSrc !== snapshotVidSrc) return;
+      if (videoId !== snapshotVideoId) return;
+      if (playerRef.current !== snapshotAdapter) return;
+      if (isLeavingRef.current) return;
+      if (!roomRef.current) return;
+
+      // --- Firebase write (exactly once) ---
+      await update(ref(db, '/rooms/' + roomRef.current.id), {
+        playbackState: resolvedPlaying ? 'PLAYING' : 'PAUSED',
+        anchorTime: finalPos,
+        updatedAt: serverTimestamp(),
+        isPlaying: resolvedPlaying,
+        currentTime: finalPos
+      });
+    } catch (err) {
+      // Adapter, Firebase, or other failure — clear suppression.
+      if (suppressTimeoutRef.current) clearTimeout(suppressTimeoutRef.current);
+      suppressTimeoutRef.current = null;
+      suppressNextStateChange.current = false;
+    } finally {
+      // Only clean up state if this seek is STILL the current owner.
+      if (seekGenerationRef.current === myGeneration) {
+        wasPlayingBeforeSeekRef.current = false;
+      }
+    }
+  }, [vidSrc, videoId]);
+
   const load = async () => {
     if (isNormalizingRef.current) return;
+    // Phase 6C: cancel any in-progress seek by advancing generation.
+    ++seekGenerationRef.current;
+    wasPlayingBeforeSeekRef.current = false;
     let vid = null;
     let src = 'youtube';
     if (ytUrl.includes('youtube.com') || ytUrl.includes('youtu.be')) { 
@@ -971,13 +1134,24 @@ const WatchPartyApp = () => {
         }
       }
 
-      // Destroy existing adapter and revoke any Drive blob before switching.
-      if (playerRef.current) {
-        playerRef.current.destroy();
-        playerRef.current = null;
-      }
-      if (vidSrc === 'drive' || src === 'drive') {
-        revokeDriveBlobUrl();
+      const isSameDrive = src === 'drive' && vidSrc === 'drive' && vid === videoId && driveBlobUrl;
+      if (isSameDrive) {
+        // Recreate the adapter while retaining the downloaded Blob/ObjectURL.
+        if (playerRef.current) {
+          playerRef.current.destroy({ revokeObjectUrl: false });
+          playerRef.current = null;
+          setPlayer(null);
+        }
+        setDriveMountGen((generation) => generation + 1);
+      } else {
+        // Destroy existing adapter and revoke any Drive blob before switching.
+        if (playerRef.current) {
+          playerRef.current.destroy();
+          playerRef.current = null;
+        }
+        if (vidSrc === 'drive' || src === 'drive') {
+          revokeDriveBlobUrl();
+        }
       }
       setDriveTapNeeded(false);
 
@@ -1139,6 +1313,9 @@ const WatchPartyApp = () => {
 
   const leave = async () => {
     isLeavingRef.current = true;
+    // Phase 6C: cancel any in-progress seek by advancing generation.
+    ++seekGenerationRef.current;
+    wasPlayingBeforeSeekRef.current = false;
     if (normalizationTimeoutRef.current) {
       clearTimeout(normalizationTimeoutRef.current);
       normalizationTimeoutRef.current = null;
@@ -1276,6 +1453,9 @@ const WatchPartyApp = () => {
       driveMetadata={driveMetadata}
       driveTapNeeded={driveTapNeeded}
       onDriveTapToSync={onDriveTapToSync}
+      // Phase 6C: Drive timeline props
+      onDriveSeekStart={handleDriveSeekStart}
+      onDriveSeekCommit={handleDriveSeekCommit}
     />
   );
 };

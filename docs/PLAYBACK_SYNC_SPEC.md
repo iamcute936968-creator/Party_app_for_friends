@@ -170,3 +170,40 @@ At minimum, validate:
 - slow network
 - multiple members
 - simultaneous UI/player events
+
+## Drive Host Seek (Phase 6C)
+
+### Seek Representation
+
+A completed host seek is represented as a single atomic reference-clock update:
+
+    playbackState = <pre-seek state>
+    anchorTime    = <seek target position>
+    updatedAt     = <server timestamp>
+
+If the seek target is at or near the video end (within 0.5s of duration),
+`playbackState` is forced to `PAUSED` regardless of the pre-seek state.
+
+### Seek Sequence
+
+1. Host initiates drag → pure UI update only (no adapter commands, no Firebase)
+2. Host drags → local slider position updates only, no Firebase
+3. Host releases → adapter.seek() + adapter.play/pause() + single Firebase write
+4. Members reconcile via standard syncMemberPlayerRefClock path
+
+### No Intermediate Firebase Writes
+
+Firebase is written exactly once per seek operation (on commit).
+No continuous or streaming updates during drag.
+
+### Member Reconciliation
+
+Members use the standard ≥2s drift threshold.
+A seek always produces drift ≥ 2s → hard seek on member.
+No member Firebase writes.
+
+### Seek Generation Ownership
+
+Each seek operation is assigned a monotonically increasing generation number.
+Only the seek with the latest generation may write Firebase or clean up
+shared local state. Stale seeks (from rapid seek scenarios) are abandoned.
