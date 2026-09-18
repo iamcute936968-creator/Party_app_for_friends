@@ -917,13 +917,17 @@ const WatchPartyApp = () => {
       const ct = adapter.getCurrentTime();
       const drift = Math.abs(ct - expected);
 
-      // Hard seek when drift exceeds 2-second threshold
-      if (drift >= 2) {
-        adapter.seek(expected);
-      }
-
       const isPlaying = st === 'PLAYING';
       const isBuffering = st === 'BUFFERING';
+
+      // Hard seek when drift exceeds 2-second threshold.
+      // Deferred (not skipped) while BUFFERING: seeking a stalled player
+      // discards its buffer and restarts the stall, creating a
+      // seek → refetch → buffer → seek loop under network streaming.
+      // The next reconciliation tick (≤5s) re-evaluates once BUFFERING clears.
+      if (drift >= 2 && !isBuffering) {
+        adapter.seek(expected);
+      }
 
       // PLAYING room + buffering → let the player resolve buffer naturally.
       if (shouldPlay && !isPlaying && !isBuffering) {
