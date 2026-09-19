@@ -40,6 +40,7 @@ export default function Room(props) {
     driveProgress,
     driveError,
     driveMetadata,
+    isStreaming = false,
     driveTapNeeded,
     onDriveTapToSync,
     // Phase 6C: Drive timeline props
@@ -148,22 +149,28 @@ export default function Room(props) {
             }}
           />
 
-          {/* Drive: Blob download in progress */}
+          {/* Drive: download or stream preparation in progress */}
           {isDriveLoading && !room?.isSharing && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-20">
               <HardDrive className="w-12 h-12 text-purple-400 mb-4 animate-pulse" />
-              <p className="text-white text-sm mb-3">Downloading video…</p>
-              {/* Progress bar */}
-              <div className="w-64 bg-gray-700 rounded-full h-2 overflow-hidden">
-                <div
-                  className="bg-purple-500 h-2 rounded-full transition-all duration-300"
-                  style={{ width: `${driveProgress}%` }}
-                />
-              </div>
-              <p className="text-gray-400 text-xs mt-2">{driveProgress}%</p>
+              <p className="text-white text-sm mb-3">
+                {isStreaming ? 'Preparing stream…' : 'Downloading video…'}
+              </p>
+              {/* Progress bar (Blob download only) */}
+              {!isStreaming && (
+                <>
+                  <div className="w-64 bg-gray-700 rounded-full h-2 overflow-hidden">
+                    <div
+                      className="bg-purple-500 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${driveProgress}%` }}
+                    />
+                  </div>
+                  <p className="text-gray-400 text-xs mt-2">{driveProgress}%</p>
+                </>
+              )}
               {driveMetadata && (
                 <p className="text-gray-500 text-xs mt-1 max-w-xs text-center truncate">
-                  {driveMetadata.name}
+                  {driveMetadata.name || (driveMetadata.fileId ? `File: ${driveMetadata.fileId}` : '')}
                   {driveMetadata.size ? ` · ${(Number(driveMetadata.size) / 1048576).toFixed(1)} MB` : ''}
                 </p>
               )}
@@ -186,8 +193,8 @@ export default function Room(props) {
             </div>
           )}
 
-          {/* Drive: large file warning (non-blocking) */}
-          {driveMetadata?.size && Number(driveMetadata.size) > 524288000 && isDriveLoading && !room?.isSharing && (
+          {/* Drive: large file warning (non-blocking, Blob download only) */}
+          {!isStreaming && driveMetadata?.size && Number(driveMetadata.size) > 524288000 && isDriveLoading && !room?.isSharing && (
             <p className="absolute bottom-8 left-0 right-0 text-center text-yellow-400 text-xs px-4 z-20">
               Large file — download may take a while and use significant memory on mobile.
             </p>
@@ -322,9 +329,8 @@ export default function Room(props) {
 
         {/* Controls Bar - Always visible at bottom */}
         <div className="bg-gray-800 p-3 border-t border-gray-700 flex-shrink-0">
-          {/* Drive auth prompt — shown to ALL participants when Drive is active but not yet authorized.
-               Every browser downloads the file using its own OAuth token (zero-backend architecture). */}
-          {vidSrc === 'drive' && !isAuthorized && !driveLoading && (
+          {/* Drive auth prompt — shown to ALL participants when Drive is active but not yet authorized (fallback mode only). */}
+          {vidSrc === 'drive' && !isStreaming && !isAuthorized && !driveLoading && (
             <div className="mb-3 flex items-center gap-3 bg-blue-900/40 border border-blue-700/40 rounded-lg px-3 py-2">
               <HardDrive className="w-4 h-4 text-blue-400 flex-shrink-0" />
               <span className="text-blue-200 text-xs flex-1">

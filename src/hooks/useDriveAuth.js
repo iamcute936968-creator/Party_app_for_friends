@@ -10,7 +10,7 @@
  * - The client secret is NEVER used or stored.
  * - Exposes: { accessToken, isAuthorized, authorize, clearToken }
  */
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
 const GIS_SCRIPT_URL = 'https://accounts.google.com/gsi/client';
@@ -117,10 +117,10 @@ export function useDriveAuth() {
   /**
    * Clear the in-memory token (e.g. on 401 response from Drive API).
    */
-  const clearToken = () => {
+  const clearToken = useCallback(() => {
     setAccessToken(null);
     setIsAuthorized(false);
-  };
+  }, []);
 
   return { accessToken, isAuthorized, authError, gisReady, authorize, clearToken };
 }

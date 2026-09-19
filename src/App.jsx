@@ -8,10 +8,14 @@ import Room from './components/Room';
 import { useWebRTC } from './hooks/useWebRTC';
 import { useDriveAuth } from './hooks/useDriveAuth';
 import { useDriveVideo } from './hooks/useDriveVideo';
+import { useDriveStream } from './hooks/useDriveStream';
 
 // Import adapters
 import { createYouTubeAdapter } from './adapters/YouTubeAdapter';
 import { createHTML5Adapter } from './adapters/HTML5Adapter';
+
+// Feature flag: Phase 7 Drive HTTP Range streaming
+const IS_DRIVE_STREAMING = import.meta.env.VITE_DRIVE_STREAMING === 'true';
 
 // Initialize Firebase
 const firebaseConfig = {
@@ -142,6 +146,7 @@ const WatchPartyApp = () => {
   // All state
   const [view, setView] = useState('home');
   const [roomId, setRoomId] = useState('');
+  const [roomSecret, setRoomSecret] = useState('');
   const [username, setUsername] = useState('');
   const [room, setRoom] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -210,23 +215,45 @@ const WatchPartyApp = () => {
   const webRTC = useWebRTC(db, roomId, username, isHost.current, room);
   const { isSharing, amSharing, shareHost, startShare, stopShare, changeQuality, currentQuality, vidRef } = webRTC;
 
-  // Drive auth and video hooks
+  // Drive auth and video hooks (Phase 6 Blob fallback)
   const driveAuth = useDriveAuth();
-  const { accessToken, isAuthorized, authError, authorize: authorizeGDrive } = driveAuth;
+  const { accessToken, isAuthorized, authError, authorize: authorizeGDrive, clearToken: clearDriveToken } = driveAuth;
 
-  const driveVideo = useDriveVideo(() => {
-    // Called by useDriveVideo on 401 — clear token so UI prompts re-auth.
-    driveAuth.clearToken();
-  });
+  const handleDriveUnauthorized = useCallback(() => {
+    // Called by useDriveVideo / useDriveStream on 401 — clear token so UI prompts re-auth.
+    clearDriveToken();
+  }, [clearDriveToken]);
+
+  const driveVideo = useDriveVideo(handleDriveUnauthorized);
   const {
     blobUrl: driveBlobUrl,
-    metadata: driveMetadata,
-    loading: driveLoading,
+    metadata: driveBlobMetadata,
+    loading: driveBlobLoading,
     progress: driveProgress,
-    error: driveError,
+    error: driveBlobError,
     loadDriveVideo,
     revokeBlobUrl: revokeDriveBlobUrl,
   } = driveVideo;
+
+  // Drive streaming hook (Phase 7.2 Range streaming)
+  const driveStream = useDriveStream({
+    proxyUrl: import.meta.env.VITE_MEDIA_PROXY_URL,
+    onUnauthorized: handleDriveUnauthorized,
+  });
+  const {
+    mediaUrl: driveStreamUrl,
+    metadata: driveStreamMetadata,
+    loading: driveStreamLoading,
+    error: driveStreamError,
+    loadDriveStream,
+    revokeStream: revokeDriveStream,
+  } = driveStream;
+
+  // Centralized active Drive media resource and states
+  const activeDriveUrl = IS_DRIVE_STREAMING ? driveStreamUrl : driveBlobUrl;
+  const driveLoading = IS_DRIVE_STREAMING ? driveStreamLoading : driveBlobLoading;
+  const driveError = IS_DRIVE_STREAMING ? driveStreamError : driveBlobError;
+  const driveMetadata = IS_DRIVE_STREAMING ? driveStreamMetadata : driveBlobMetadata;
 
   // Options
   const avOpts = [
@@ -248,6 +275,21 @@ const WatchPartyApp = () => {
         setLastHostRoom(roomData);
       } catch (e) {}
     }
+  }, []);
+
+  // Parse room and secret from URL query params on initial load
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const urlRoom = params.get('room');
+      const urlSecret = params.get('s');
+      if (urlRoom) {
+        setRoomId(urlRoom.trim().toUpperCase());
+      }
+      if (urlSecret) {
+        setRoomSecret(urlSecret.trim());
+      }
+    } catch (_) {}
   }, []);
 
   // Track Firebase server-time offset for reference-clock calculations
@@ -617,9 +659,9 @@ const WatchPartyApp = () => {
     };
   }, [videoId, vidSrc, ytReady]);
 
-  // Drive HTML5 adapter setup — runs when the Drive blob URL becomes available.
+  // Drive HTML5 adapter setup — runs when the Drive media URL becomes available.
   useEffect(() => {
-    if (vidSrc !== 'drive' || !driveBlobUrl || !driveVideoRef.current) return;
+    if (vidSrc !== 'drive' || !activeDriveUrl || !driveVideoRef.current) return;
 
     // Destroy any existing adapter (e.g. a previous Drive load).
     if (playerRef.current) {
@@ -629,7 +671,7 @@ const WatchPartyApp = () => {
     setDriveTapNeeded(false);
 
     const videoEl = driveVideoRef.current;
-    const adapter = createHTML5Adapter(videoEl, driveBlobUrl);
+    const adapter = createHTML5Adapter(videoEl, activeDriveUrl);
 
     adapter.onReady(() => {
       playerRef.current = adapter;
@@ -709,29 +751,46 @@ const WatchPartyApp = () => {
       // videoId/vidSrc changes and leave(). Destroying on blobUrl change
       // would remove listeners before the component unmounts.
     };
-  }, [vidSrc, driveBlobUrl, driveMountGen]);
+  }, [vidSrc, activeDriveUrl, driveMountGen]);
 
-  // When videoId changes to a new Drive video, trigger the Blob download
-  // (if the access token is available).
+  // When streaming feature flag is ON: fetch playback ticket when videoId or room auth changes.
   useEffect(() => {
+    if (!IS_DRIVE_STREAMING) return;
+    if (vidSrc === 'drive' && videoId) {
+      const activeSecret = roomSecret || room?.secret;
+      if (room?.id && activeSecret && username) {
+        loadDriveStream(videoId, {
+          roomId: room.id,
+          roomSecret: activeSecret,
+          username,
+        });
+      }
+    }
+  }, [vidSrc, videoId, room?.id, roomSecret, room?.secret, username, loadDriveStream]);
+
+  // When streaming feature flag is OFF: trigger Blob download when videoId or accessToken changes.
+  useEffect(() => {
+    if (IS_DRIVE_STREAMING) return;
     if (vidSrc === 'drive' && videoId && accessToken) {
       loadDriveVideo(videoId, accessToken);
     }
-  }, [vidSrc, videoId, accessToken]);
+  }, [vidSrc, videoId, accessToken, loadDriveVideo]);
 
   // Fix 3: Drive → non-Drive cleanup.
   // When vidSrc transitions away from 'drive' (e.g. host switches to YouTube),
-  // cancel any active download and revoke the Blob/ObjectURL so no stale
-  // memory or state remains. The Drive→Drive reload path is unaffected because
-  // that useEffect above handles it before vidSrc changes.
+  // cancel any active stream/download and revoke resources so no stale state remains.
   const prevVidSrcRef = useRef(vidSrc);
   useEffect(() => {
     const prev = prevVidSrcRef.current;
     prevVidSrcRef.current = vidSrc;
     if (prev === 'drive' && vidSrc !== 'drive') {
-      revokeDriveBlobUrl();
+      if (IS_DRIVE_STREAMING) {
+        revokeDriveStream();
+      } else {
+        revokeDriveBlobUrl();
+      }
     }
-  }, [vidSrc]);
+  }, [vidSrc, revokeDriveStream, revokeDriveBlobUrl]);
 
   // Floating messages
   useEffect(() => {
@@ -757,9 +816,12 @@ const WatchPartyApp = () => {
     if (!username.trim()) return alert('Enter name');
     setLoading(true);
     const id = genId();
+    const secret = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : (genId() + genId() + genId() + genId());
     const roomRef_ = ref(db, '/rooms/' + id);
     const rm = { 
       id, 
+      secret,
+      roomSecret: secret,
       host: username, 
       participants: { [username]: true }, 
       createdAt: Date.now(), 
@@ -781,12 +843,14 @@ const WatchPartyApp = () => {
       localStorage.setItem('lastHostedRoom', JSON.stringify({
         roomId: id,
         hostName: username,
+        roomSecret: secret,
         createdAt: Date.now()
       }));
       
       isLeavingRef.current = false;
       isHost.current = true;
       setRoom(rm);
+      setRoomSecret(secret);
       setParticipants([username]);
       setRoomId(id);
       setView('room');
@@ -816,6 +880,9 @@ const WatchPartyApp = () => {
           { type: 'system', text: username + ' (Host) rejoined', time: new Date().toLocaleTimeString(), timestamp: Date.now() }
         );
         
+        const activeSecret = lastHostRoom.roomSecret || rm.secret || '';
+        if (activeSecret) setRoomSecret(activeSecret);
+
         isLeavingRef.current = false;
         isHost.current = true;
         setRoom(rm);
@@ -836,12 +903,31 @@ const WatchPartyApp = () => {
   const join = async () => {
     if (!username.trim() || !roomId.trim()) return alert('Enter name and ID');
     setLoading(true);
-    const id = roomId.toUpperCase();
+    let id = roomId.trim();
+    let secretCandidate = roomSecret;
+    // Extract room and secret if user pasted a full URL or query string
+    if (id.includes('?') || id.startsWith('http')) {
+      try {
+        const parsed = new URL(id.startsWith('http') ? id : `https://dummy/${id}`);
+        const qRoom = parsed.searchParams.get('room');
+        const qSecret = parsed.searchParams.get('s');
+        if (qRoom) id = qRoom;
+        if (qSecret) {
+          secretCandidate = qSecret;
+          setRoomSecret(qSecret);
+        }
+      } catch (_) {}
+    }
+    id = id.toUpperCase();
     const roomRef_ = ref(db, '/rooms/' + id);
     try {
       const snapshot = await fbGet(roomRef_);
       const rm = snapshot.val();
       if (rm) {
+        const finalSecret = secretCandidate || rm.secret || '';
+        if (finalSecret) {
+          setRoomSecret(finalSecret);
+        }
         await update(ref(db, '/rooms/' + id + '/participants'), { [username]: true });
         
         await push(ref(db, '/rooms/' + id + '/messages'), 
@@ -947,7 +1033,11 @@ const WatchPartyApp = () => {
 
   const copy = () => { 
     if (navigator.clipboard) {
-      navigator.clipboard.writeText(room.id); 
+      const shareSecret = roomSecret || room?.secret;
+      const shareUrl = shareSecret 
+        ? `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(room.id)}&s=${encodeURIComponent(shareSecret)}`
+        : `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(room.id)}`;
+      navigator.clipboard.writeText(shareUrl); 
       setCopied(true); 
       setTimeout(() => setCopied(false), 2000); 
     } else {
@@ -1128,8 +1218,8 @@ const WatchPartyApp = () => {
     }
     
     if (vid && room) {
-      // If switching to Drive and not yet authorized, prompt auth first.
-      if (src === 'drive' && !isAuthorized) {
+      // If switching to Drive in fallback mode and not yet authorized, prompt auth first.
+      if (src === 'drive' && !IS_DRIVE_STREAMING && !isAuthorized) {
         try {
           await authorizeGDrive();
         } catch (err) {
@@ -1138,9 +1228,9 @@ const WatchPartyApp = () => {
         }
       }
 
-      const isSameDrive = src === 'drive' && vidSrc === 'drive' && vid === videoId && driveBlobUrl;
+      const isSameDrive = src === 'drive' && vidSrc === 'drive' && vid === videoId && activeDriveUrl;
       if (isSameDrive) {
-        // Recreate the adapter while retaining the downloaded Blob/ObjectURL.
+        // Recreate the adapter while retaining the active media resource.
         if (playerRef.current) {
           playerRef.current.destroy({ revokeObjectUrl: false });
           playerRef.current = null;
@@ -1148,13 +1238,17 @@ const WatchPartyApp = () => {
         }
         setDriveMountGen((generation) => generation + 1);
       } else {
-        // Destroy existing adapter and revoke any Drive blob before switching.
+        // Destroy existing adapter and revoke any Drive blob or stream before switching.
         if (playerRef.current) {
           playerRef.current.destroy();
           playerRef.current = null;
         }
         if (vidSrc === 'drive' || src === 'drive') {
-          revokeDriveBlobUrl();
+          if (IS_DRIVE_STREAMING) {
+            revokeDriveStream();
+          } else {
+            revokeDriveBlobUrl();
+          }
         }
       }
       setDriveTapNeeded(false);
@@ -1378,8 +1472,13 @@ const WatchPartyApp = () => {
       try { playerRef.current.destroy(); } catch (e) {}
       playerRef.current = null;
     }
-    // Revoke any pending Drive blob URL from the hook's ref as well.
-    revokeDriveBlobUrl();
+    // Revoke any pending Drive stream or blob URL
+    if (IS_DRIVE_STREAMING) {
+      revokeDriveStream();
+    } else {
+      revokeDriveBlobUrl();
+    }
+    setRoomSecret('');
 
     if (memberSyncInt.current) { clearInterval(memberSyncInt.current); memberSyncInt.current = null; }
     if (roomListener.current) roomListener.current();
@@ -1452,9 +1551,10 @@ const WatchPartyApp = () => {
       onAuthorize={authorizeGDrive}
       authError={authError}
       driveLoading={driveLoading}
-      driveProgress={driveProgress}
+      driveProgress={IS_DRIVE_STREAMING ? 0 : driveProgress}
       driveError={driveError}
       driveMetadata={driveMetadata}
+      isStreaming={IS_DRIVE_STREAMING}
       driveTapNeeded={driveTapNeeded}
       onDriveTapToSync={onDriveTapToSync}
       // Phase 6C: Drive timeline props

@@ -18,7 +18,7 @@
  * Does NOT reject on non-mp4 MIME types — the caller attempts HTML5 playback
  * and handles the native video error event.
  */
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 
 const API_ROOT = 'https://www.googleapis.com/drive/v3/files/';
 
@@ -28,6 +28,12 @@ export function useDriveVideo(onUnauthorized) {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);   // 0–100
   const [error, setError] = useState(null);
+
+  // Keep a ref to the onUnauthorized callback so driveFetch remains referentially stable.
+  const onUnauthorizedRef = useRef(onUnauthorized);
+  useEffect(() => {
+    onUnauthorizedRef.current = onUnauthorized;
+  }, [onUnauthorized]);
 
   // Keep a ref to the current ObjectURL so we can revoke it on the next load.
   const currentBlobUrlRef = useRef(null);
@@ -74,7 +80,7 @@ export function useDriveVideo(onUnauthorized) {
 
     if (!response.ok) {
       if (response.status === 401) {
-        onUnauthorized?.();
+        onUnauthorizedRef.current?.();
         throw new Error('401: OAuth token expired or invalid. Please re-authorize.');
       }
       if (response.status === 403) {
@@ -83,7 +89,7 @@ export function useDriveVideo(onUnauthorized) {
       throw new Error(`Drive request failed with HTTP ${response.status}.`);
     }
     return response;
-  }, [onUnauthorized]);
+  }, []);
 
   /**
    * Fetch Drive file metadata, then download the media as a Blob.
