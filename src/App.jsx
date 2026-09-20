@@ -757,7 +757,7 @@ const WatchPartyApp = () => {
   useEffect(() => {
     if (!IS_DRIVE_STREAMING) return;
     if (vidSrc === 'drive' && videoId) {
-      const activeSecret = roomSecret || room?.secret;
+      const activeSecret = roomSecret || (isHost.current ? (room?.secret || '') : '');
       if (room?.id && activeSecret && username) {
         loadDriveStream(videoId, {
           roomId: room.id,
@@ -766,7 +766,7 @@ const WatchPartyApp = () => {
         });
       }
     }
-  }, [vidSrc, videoId, room?.id, roomSecret, room?.secret, username, loadDriveStream]);
+  }, [vidSrc, videoId, room?.id, roomSecret, username, loadDriveStream]);
 
   // When streaming feature flag is OFF: trigger Blob download when videoId or accessToken changes.
   useEffect(() => {
@@ -924,10 +924,8 @@ const WatchPartyApp = () => {
       const snapshot = await fbGet(roomRef_);
       const rm = snapshot.val();
       if (rm) {
-        const finalSecret = secretCandidate || rm.secret || '';
-        if (finalSecret) {
-          setRoomSecret(finalSecret);
-        }
+        const finalSecret = secretCandidate || '';
+        setRoomSecret(finalSecret);
         await update(ref(db, '/rooms/' + id + '/participants'), { [username]: true });
         
         await push(ref(db, '/rooms/' + id + '/messages'), 
@@ -1033,7 +1031,7 @@ const WatchPartyApp = () => {
 
   const copy = () => { 
     if (navigator.clipboard) {
-      const shareSecret = roomSecret || room?.secret;
+      const shareSecret = roomSecret || (isHost.current ? room?.secret : '');
       const shareUrl = shareSecret 
         ? `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(room.id)}&s=${encodeURIComponent(shareSecret)}`
         : `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(room.id)}`;
