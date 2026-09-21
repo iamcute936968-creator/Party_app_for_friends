@@ -141,6 +141,7 @@ export default function Room(props) {
             ref={driveVideoRef}
             playsInline
             webkit-playsinline="true"
+            preload="metadata"
             className="w-full h-full object-contain bg-black"
             style={{
               display: (videoId && vidSrc === 'drive' && !room?.isSharing) ? 'block' : 'none',
