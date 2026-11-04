@@ -1,0 +1,73 @@
+import { readFile } from 'node:fs/promises';
+import { expect, test } from '@playwright/test';
+import { fulfillAnimeFixture } from '../helpers/anime-hls-fixture';
+const database = await readFile(new URL('./firebase-fixture.js', import.meta.url), 'utf8');
+const auth = await readFile(new URL('./firebase-auth-fixture.js', import.meta.url), 'utf8');
+test.beforeEach(async ({ page }) => {
+  await page.route('**/*', async route => {
+    if (await fulfillAnimeFixture(route)) return;
+    const u = new URL(route.request().url());
+    if (u.pathname.includes('/api/movies')) {
+      const tv = { id: '1399', mediaKind: 'tv', title: 'The test series', genres: [], seasons: [{ number: 1, name: 'Season 1' }] };
+      return route.fulfill({ json: u.pathname.includes('/season/') ? { showId: '1399', number: 1, episodes: [1, 2, 3].map(number => ({ id: String(number), number, title: `Episode ${number}`, seasonNumber: 1, showId: '1399' })) } : u.pathname.endsWith('/1399') ? tv : { items: [tv], pageInfo: { page: 1, hasNextPage: false } } });
+    }
+    if (u.pathname.includes('/__test/media-proxy/')) return route.fulfill({ json: { items: [], pageInfo: { page: 1, hasNextPage: false } } });
+    if (u.origin === 'http://127.0.0.1:5175') return route.continue();
+    let body = '';
+    if (u.pathname.endsWith('/firebase-database.js')) body = database;
+    else if (u.pathname.endsWith('/firebase-auth.js')) body = auth;
+    else if (u.pathname.endsWith('/firebase-app.js')) body = 'export const initializeApp=()=>({});';
+    else if (u.hostname === 'www.youtube.com') body = 'window.YT={Player:function(){}};window.onYouTubeIframeAPIReady?.();';
+    else if (u.hostname === 'accounts.google.com') body = 'window.google={accounts:{oauth2:{}}};';
+    else return route.abort();
+    return route.fulfill({ contentType: 'text/javascript', headers: { 'access-control-allow-origin': '*' }, body });
+  });
+});
+test('unifies search focus, select chevrons and mobile navigation', async ({ page }, info) => {
+  await page.goto('/movies');
+  const nav = page.getByRole('navigation', { name: 'Main navigation' });
+  await expect(nav.getByRole('link')).toHaveText(['Watch Together', 'Movies', 'Anime', 'Library']);
+  await expect(page.getByRole('link', { name: 'Account', exact: true })).toHaveCSS('border-radius', '50%');
+  const input = page.getByRole('searchbox', { name: 'Movie or TV title' });
+  await input.focus();
+  await expect(input).toHaveCSS('outline-style', 'none');
+  const wrapper = input.locator('..');
+  await expect(wrapper).toHaveCSS('border-color', 'rgb(223, 89, 75)');
+  const select = page.getByLabel('Language', { exact: true });
+  await expect(select).toHaveCSS('appearance', 'none');
+  expect(await select.evaluate(el => getComputedStyle(el).backgroundImage)).toContain('data:image/svg+xml');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('ux-navigation.png'), fullPage: false });
+});
+test('host browses anime and TV inside the room and changes shared episodes', async ({ page }, info) => {
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  await page.getByLabel('Your name', { exact: true }).fill('Host');
+  await page.getByRole('button', { name: 'Create Room', exact: true }).click();
+  await page.evaluate(() => window.setTestConnection(true));
+  const stage = await page.locator('.video-stage').elementHandle();
+  const voice = await page.getByRole('region', { name: 'Voice chat' }).elementHandle();
+  const browse = page.getByRole('button', { name: 'Browse media' });
+  await browse.click();
+  let dialog = page.getByRole('dialog', { name: 'Browse media for this room' });
+  await dialog.getByRole('button', { name: 'Details for Naruto' }).click();
+  await dialog.getByRole('button', { name: 'Watch episode 2', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Watch episode 2', exact: true })).toHaveAttribute('aria-current', 'true');
+  expect(await stage.evaluate(el => el.isConnected)).toBe(true);
+  expect(await voice.evaluate(el => el.isConnected)).toBe(true);
+  await expect(browse).toBeFocused();
+  await page.screenshot({ path: info.outputPath('ux-room.png'), fullPage: false });
+  await browse.click(); dialog = page.getByRole('dialog', { name: 'Browse media for this room' });
+  await dialog.getByRole('button', { name: 'Movies & TV', exact: true }).click();
+  await dialog.getByRole('button', { name: 'TV shows', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Details for The test series' }).click();
+  await dialog.getByRole('button', { name: 'Watch episode 2 together', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTitle('Room movie player')).toHaveAttribute('src', /\/tv\/1399\?.*[?&]s=1&e=2/);
+  await page.getByRole('button', { name: 'Next TV episode', exact: true }).click();
+  await expect(page.getByTitle('Room movie player')).toHaveAttribute('src', /\/tv\/1399\?.*[?&]s=1&e=3/);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(new URL(page.url()).pathname).toBe('/');
+  expect(errors).toEqual([]);
+});

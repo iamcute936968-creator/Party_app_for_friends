@@ -80,7 +80,7 @@ export function useDriveVideo(onUnauthorized) {
 
     if (!response.ok) {
       if (response.status === 401) {
-        onUnauthorizedRef.current?.();
+        if (!signal.aborted) onUnauthorizedRef.current?.();
         throw new Error('401: OAuth token expired or invalid. Please re-authorize.');
       }
       if (response.status === 403) {
@@ -121,6 +121,7 @@ export function useDriveVideo(onUnauthorized) {
         `?fields=name,size,mimeType,capabilities(canDownload)`;
       const metaResponse = await driveFetch(metaUrl, accessToken, controller.signal);
       const meta = await metaResponse.json();
+      if (abortControllerRef.current !== controller) return;
 
       // Warn (not block) if canDownload is explicitly false.
       if (meta.capabilities?.canDownload === false) {
@@ -153,7 +154,6 @@ export function useDriveVideo(onUnauthorized) {
       const chunks = [];
       let received = 0;
 
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -213,6 +213,15 @@ export function useDriveVideo(onUnauthorized) {
     setError(null);
     setProgress(0);
   }, [cancelDownload, revokeCurrent]);
+
+  useEffect(() => () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    if (currentBlobUrlRef.current) {
+      try { URL.revokeObjectURL(currentBlobUrlRef.current); } catch { /* Already released. */ }
+      currentBlobUrlRef.current = null;
+    }
+  }, []);
 
   return {
     blobUrl,

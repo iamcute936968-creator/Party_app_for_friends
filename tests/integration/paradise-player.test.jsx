@@ -1,0 +1,65 @@
+import React from 'react';
+import { cleanup, fireEvent, render, screen, waitFor, act } from '@testing-library/react';
+import { afterEach, expect, it, vi } from 'vitest';
+import ParadisePlayer from '../../src/components/ParadisePlayer';
+const stubs = vi.hoisted(() => ({ attach: vi.fn() }));
+vi.mock('../../src/anime/hls', () => ({ attachAnimeHls: stubs.attach }));
+const episode = { id: 'uuid', number: 1, source: 'hls' };
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.clearAllMocks(); });
+it('resolves episodes independently, attaches HLS, exposes captions and releases playback on exit', async () => {
+  const destroy = vi.fn(); stubs.attach.mockResolvedValue(destroy);
+  const api = { stream: vi.fn(async () => ({ sourceUrl: 'https://stream.animeparadise.moe/m3u8?url=opaque', subtitles: [{ src: 'https://stream.animeparadise.moe/captions?x=1', language: 'en', label: 'English' }] })) };
+  const view = render(<ParadisePlayer api={api} animeId="ap_naruto" title="Naruto" episode={episode} />);
+  await waitFor(() => expect(stubs.attach).toHaveBeenCalledTimes(1));
+  const video = screen.getByLabelText('Naruto episode 1 video');
+  fireEvent.loadedMetadata(video); expect(screen.queryByText('Preparing video…')).toBeNull();
+  expect(video.controls).toBe(true); expect(video.querySelector('track').label).toBe('English');
+  view.unmount(); expect(destroy).toHaveBeenCalledTimes(1);
+});
+it('rejects stale episode resolutions and supports retry after a generic failure', async () => {
+  let resolve; const api = { stream: vi.fn().mockRejectedValueOnce(Error('private upstream url')).mockImplementationOnce(() => new Promise(done => { resolve = done; })) };
+  const view = render(<ParadisePlayer api={api} animeId="ap_naruto" title="Naruto" episode={episode} />);
+  expect((await screen.findByRole('alert')).textContent).not.toContain('private upstream');
+  fireEvent.click(screen.getByRole('button', { name: 'Retry playback' }));
+  await waitFor(() => expect(api.stream).toHaveBeenCalledTimes(2)); view.unmount();
+  await act(async () => resolve({ sourceUrl: 'https://stream.animeparadise.moe/m3u8?url=old', subtitles: [] }));
+  expect(stubs.attach).not.toHaveBeenCalled();
+});
+it('lets the shared HLS owner recover a native error before showing a terminal episode failure', async () => {
+  const stop = vi.fn(); stubs.attach.mockResolvedValue(stop);
+  const api = { stream: vi.fn(async () => ({ sourceUrl: 'https://stream.animeparadise.moe/m3u8?url=opaque', subtitles: [] })) };
+  render(<ParadisePlayer api={api} animeId="ap_tokyo-ghoul-re" title="Tokyo Ghoul:re" episode={episode} />);
+  await waitFor(() => expect(stubs.attach).toHaveBeenCalledOnce());
+  fireEvent.error(screen.getByLabelText('Tokyo Ghoul:re episode 1 video'));
+  expect(screen.queryByRole('alert')).toBeNull();
+  fireEvent.loadedMetadata(screen.getByLabelText('Tokyo Ghoul:re episode 1 video'));
+  expect(screen.queryByText('Preparing video…')).toBeNull();
+  act(() => stubs.attach.mock.calls[0][2].onError({ code: 3 }));
+  expect(screen.getByRole('alert')).toBeTruthy(); expect(stop).toHaveBeenCalledOnce();
+});
+
+it('bounds preparation at forty seconds, releases the failed attempt and recovers through a fresh retry', async () => {
+  vi.useFakeTimers();
+  const oldStop = vi.fn(), newStop = vi.fn();
+  stubs.attach.mockResolvedValueOnce(oldStop).mockResolvedValueOnce(newStop);
+  const api = { stream: vi.fn(async () => ({ sourceUrl: 'https://stream.animeparadise.moe/m3u8?url=opaque', subtitles: [] })) };
+  const view = render(<ParadisePlayer api={api} animeId="ap_attack-on-titan" title="Attack on Titan" episode={episode} />);
+  await act(async () => { await Promise.resolve(); });
+  expect(stubs.attach).toHaveBeenCalledOnce();
+  const oldVideo = screen.getByLabelText('Attack on Titan episode 1 video'), oldSignal = api.stream.mock.calls[0][2].signal;
+  await act(async () => vi.advanceTimersByTimeAsync(39999));
+  expect(screen.queryByRole('alert')).toBeNull(); expect(oldSignal.aborted).toBe(false);
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(screen.getByRole('alert').textContent).toContain('This episode could not play');
+  expect(screen.getByRole('button', { name: 'Retry playback' })).toBeTruthy();
+  expect(oldSignal.aborted).toBe(true); expect(oldStop).toHaveBeenCalledOnce();
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry playback' })); await Promise.resolve(); });
+  expect(api.stream).toHaveBeenCalledTimes(2); expect(stubs.attach).toHaveBeenCalledTimes(2);
+  const newVideo = screen.getByLabelText('Attack on Titan episode 1 video'), newSignal = api.stream.mock.calls[1][2].signal;
+  expect(newSignal).not.toBe(oldSignal); expect(newSignal.aborted).toBe(false); expect(newVideo).not.toBe(oldVideo);
+  fireEvent.loadedMetadata(oldVideo); expect(screen.getByText('Preparing video…')).toBeTruthy();
+  fireEvent.loadedMetadata(newVideo); expect(screen.queryByText('Preparing video…')).toBeNull();
+  await act(async () => vi.advanceTimersByTimeAsync(40001));
+  expect(screen.queryByRole('alert')).toBeNull(); expect(newSignal.aborted).toBe(false);
+  view.unmount(); expect(newSignal.aborted).toBe(true); expect(newStop).toHaveBeenCalledOnce();
+});

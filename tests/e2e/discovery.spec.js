@@ -1,0 +1,34 @@
+import { readFile } from 'node:fs/promises';
+import { expect, test } from '@playwright/test';
+const database = await readFile(new URL('./firebase-fixture.js', import.meta.url), 'utf8');
+const auth = await readFile(new URL('./firebase-auth-fixture.js', import.meta.url), 'utf8');
+test.skip('discovers a title, opens attributed details and keeps the premium layout usable (decommissioned with Discover tab removal)', async ({ page }, info) => {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.route('**/*', async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith('/api/catalog/search')) return route.fulfill({ json: { items: [{ id: 'Inception', title: 'Inception', description: '2010 film', excerpt: 'A science fiction film.', sourceUrl: 'https://en.wikipedia.org/wiki/Inception' }], attribution: 'Wikipedia / Wikimedia' } });
+    if (url.pathname.endsWith('/api/catalog/details')) return route.fulfill({ json: { id: 'Inception', title: 'Inception', extract: 'Details for your next movie night.', sourceUrl: 'https://en.wikipedia.org/wiki/Inception' } });
+    if (url.origin === 'http://127.0.0.1:5175') return route.continue();
+    let body;
+    if (url.pathname.endsWith('/firebase-database.js')) body = database;
+    else if (url.pathname.endsWith('/firebase-auth.js')) body = auth;
+    else if (url.pathname.endsWith('/firebase-app.js')) body = 'export const initializeApp=()=>({});';
+    else if (url.hostname === 'www.youtube.com') body = 'window.YT={Player:function(){}};window.onYouTubeIframeAPIReady?.();';
+    else if (url.hostname === 'accounts.google.com') body = 'window.google={accounts:{oauth2:{}}};';
+    else throw new Error('Unexpected external request: ' + url.origin);
+    return route.fulfill({ contentType: 'text/javascript', headers: { 'access-control-allow-origin': '*' }, body });
+  });
+  await page.goto('/');
+  await page.getByRole('link', { name: 'Discover', exact: true }).click();
+  await page.getByRole('button', { name: 'Reference search', exact: true }).click();
+  await page.getByLabel('Movie or anime title').fill('Inception');
+  await page.getByRole('button', { name: 'Search titles', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Inception', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Details for Inception', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Movie or anime details' })).toContainText('Details for your next movie night.');
+  await expect(page.getByRole('link', { name: 'Read on Wikipedia' })).toHaveAttribute('href', 'https://en.wikipedia.org/wiki/Inception');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('discovery.png'), fullPage: true });
+  expect(errors).toEqual([]);
+});

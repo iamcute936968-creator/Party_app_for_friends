@@ -1,0 +1,72 @@
+@import './AnimePage.css';
+
+.manga-page { min-width: 0; }
+.manga-intro { margin-bottom: 28px; }
+.manga-eyebrow { margin: 0 0 12px; color: #bc9e87; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+.manga-intro h1 { font-size: clamp(30px, 4vw, 46px); font-weight: 800; line-height: 1.15; letter-spacing: -.04em; }
+.manga-intro > p:last-child { margin-top: 16px; color: var(--muted); line-height: 1.7; }
+.manga-search { display: flex; align-items: flex-end; gap: 14px; margin: 28px 0; max-width: 680px; }
+.manga-search label { flex: 1; min-width: 0; font-size: 13px; }
+.manga-search label > div { display: flex; align-items: center; gap: 12px; margin-top: 10px; padding-left: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.manga-search svg { width: 18px; color: var(--muted); flex-shrink: 0; }
+.manga-search input { width: 100%; min-width: 0; padding: 14px 12px 14px 0; border: 0; border-radius: 8px; background: transparent; }
+.manga-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 28px 20px; margin-top: 28px; }
+.manga-card { position: relative; min-width: 0; }
+.manga-card img, .manga-cover-fallback { width: 100%; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 8px; background: var(--surface-raised); }
+.manga-cover-fallback { display: grid; place-items: center; color: var(--muted); }
+.manga-card .room-button { font-size: 12px; padding: 10px 4px; text-align: left; }
+.manga-detail { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 32px; padding: 28px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.manga-detail-cover img { width: 100%; height: auto; border-radius: 8px; }
+.manga-detail h1 { font-size: clamp(28px, 3vw, 40px); line-height: 1.2; letter-spacing: -.035em; overflow-wrap: anywhere; }
+.manga-description { margin: 18px 0; color: #c3cbd5; line-height: 1.8; font-size: 14px; white-space: pre-line; }
+.manga-secondary { margin: 12px 0; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.manga-detail .room-button { margin: 10px 12px 0 0; }
+.manga-chapters { margin-top: 36px; }
+.manga-chapters h2 { font-size: 24px; letter-spacing: -.02em; }
+.manga-chapters ul { margin: 16px 0 0; padding: 0; list-style: none; }
+.manga-chapters li { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 20px 0; border-bottom: 1px solid var(--line); }
+.manga-chapters li > div { min-width: 0; overflow-wrap: anywhere; }
+.manga-chapters li p { margin-top: 8px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.manga-chapters li .room-button { flex-shrink: 0; }
+.manga-pagination { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+.manga-credits { margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; line-height: 1.8; }
+.manga-credits a { color: #c6b2a4; text-decoration: underline; text-underline-offset: 3px; }
+.manga-import { margin-top: 24px; color: var(--muted); font-size: 13px; line-height: 1.7; }
+.manga-import button { margin-top: 12px; }
+.manga-reader { width: 100%; margin: 0 auto; }
+.manga-reader h1 { font-size: clamp(25px, 3vw, 36px); line-height: 1.25; letter-spacing: -.03em; overflow-wrap: anywhere; }
+.manga-reader-chapter { margin-top: 12px; color: var(--muted); line-height: 1.6; }
+.manga-reader-controls { position: sticky; top: var(--site-header-height, 76px); z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 24px 0 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px 8px 0 0; background: var(--bg); }
+.manga-reader-controls > p { text-align: center; color: #c3cbd5; font-size: 13px; }
+.manga-reader-controls svg { width: 17px; }
+.manga-page-jump { display: flex; justify-content: center; align-items: center; gap: 12px; margin: 24px 0; }
+.manga-page-jump label { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; }
+.manga-page-jump input { width: 76px; min-height: 44px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.manga-page-image { position: relative; min-height: 320px; background: #15181d; overflow: hidden; scroll-margin-top: calc(var(--site-header-height, 76px) + 75px); }
+.manga-reader-pages { background: #15181d; }
+.manga-page-placeholder { min-height: inherit; display: grid; place-items: center; color: var(--muted); font-size: 12px; }
+.manga-chapter-navigation { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; padding: 20px 0; }
+.manga-chapter-navigation label { display: grid; gap: 8px; color: var(--muted); font-size: 13px; max-width: 100%; }
+.manga-chapter-navigation select { min-height: 44px; padding: 10px 12px; max-width: 100%; border: 1px solid var(--line); border-radius: 7px; background-color: var(--surface); color: var(--text); }
+.manga-page-image img { display: block; width: 100%; height: auto; min-height: 1px; }
+.manga-image-status { position: absolute; inset: 0; display: grid; place-items: center; background: var(--surface); color: var(--muted); font-size: 14px; }
+.manga-image-error { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 24px; text-align: center; color: #e8b3a9; }
+.manga-reader-end { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; margin-top: 24px; color: var(--muted); }
+@media (max-width: 1000px) { .manga-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@media (max-width: 650px) {
+  .manga-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px 12px; }
+  .manga-detail { grid-template-columns: 100px minmax(0, 1fr); gap: 18px; padding: 18px; }
+  .manga-description { grid-column: 1 / -1; }
+  .manga-chapters li { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .manga-reader-controls { gap: 8px; }
+  .manga-reader-controls .room-button { padding: 12px 10px; font-size: 12px; }
+  .manga-reader-controls svg { display: block; }
+  .manga-reader-controls .room-button span { display: none; }
+  .manga-reader-controls > p { font-size: 12px; }
+}
+@media (max-width: 420px) {
+  .manga-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .manga-search { flex-direction: column; align-items: stretch; }
+  .manga-detail { grid-template-columns: minmax(0, 1fr); }
+  .manga-detail-cover { max-width: 130px; }
+}

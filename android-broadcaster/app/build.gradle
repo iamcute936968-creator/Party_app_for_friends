@@ -1,0 +1,37 @@
+plugins { id 'com.android.application' }
+
+def configFile = providers.gradleProperty('firebaseConfig').orNull
+if (!configFile) throw new GradleException('Provide -PfirebaseConfig=/path/to/google-services.json')
+def config = new groovy.json.JsonSlurper().parse(file(configFile))
+def client = config.client.find { it.client_info.android_client_info.package_name == 'com.watchparty.broadcast' }
+if (config.project_info.project_id != 'watch-party-app-9fc62' || !client) {
+    throw new GradleException('Firebase project or Android package does not match this application')
+}
+
+android {
+    namespace 'com.watchparty.broadcast'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'com.watchparty.broadcast'
+        minSdk 30
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        buildConfigField 'String', 'FIREBASE_API_KEY', groovy.json.JsonOutput.toJson(client.api_key[0].current_key)
+        buildConfigField 'String', 'FIREBASE_APP_ID', groovy.json.JsonOutput.toJson(client.client_info.mobilesdk_app_id)
+    }
+    buildFeatures { buildConfig true }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}
+
+dependencies {
+    implementation platform('com.google.firebase:firebase-bom:35.1.0')
+    implementation 'com.google.firebase:firebase-auth'
+    implementation 'com.google.firebase:firebase-database'
+    implementation 'io.github.webrtc-sdk:android:150.7871.01'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.3.0'
+}

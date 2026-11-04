@@ -2,13 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="icon" type="image/svg+xml" href="/watch-party.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="referrer" content="no-referrer" />
-    <title>party.json</title>
+    <link rel="stylesheet" href="/loading.css" />
+    <title>Watch Party | Watch together</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="startup-loading" role="status" aria-label="Loading Watch Party" aria-busy="true">
+      <p>WATCH PARTY</p><span class="loading-message">Loading Watch Party…</span>
+      <div aria-hidden="true"><div class="skeleton-shape skeleton-title"></div><div class="skeleton-shape skeleton-line skeleton-short"></div>
+        <div class="skeleton-grid"><div class="skeleton-shape skeleton-poster"></div><div class="skeleton-shape skeleton-poster"></div><div class="skeleton-shape skeleton-poster"></div><div class="skeleton-shape skeleton-poster"></div><div class="skeleton-shape skeleton-poster"></div></div>
+      </div>
+    </div></div>
+    <noscript>This application needs JavaScript enabled to load your watch party.</noscript>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

@@ -1,0 +1,4 @@
+<resources>
+    <string name="capture_cancelled">Screen sharing cancelled. Your screen is not being captured.</string>
+    <string name="connecting">Connecting to your private room…</string>
+</resources>

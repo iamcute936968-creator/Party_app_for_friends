@@ -79,6 +79,8 @@ export function useDriveStream(options = {}) {
     const controller = new AbortController();
     abortControllerRef.current = controller;
     const currentGen = ++requestGenRef.current;
+    const isCurrent = () => requestGenRef.current === currentGen &&
+      abortControllerRef.current === controller && !controller.signal.aborted;
 
     // Reset error, set loading
     setError(null);
@@ -100,6 +102,12 @@ export function useDriveStream(options = {}) {
       }
 
       const ticketEndpoint = `${baseProxyUrl}/api/ticket`;
+      let firebaseIdToken;
+      if (activeOptions.getIdToken) {
+        try { firebaseIdToken = await activeOptions.getIdToken(); }
+        catch { throw new Error('Sign in to the room again to prepare this video.'); }
+        if (!isCurrent()) return false;
+      }
       const response = await fetch(ticketEndpoint, {
         method: 'POST',
         headers: {
@@ -111,9 +119,11 @@ export function useDriveStream(options = {}) {
           roomSecret,
           username,
           fileId,
+          ...(firebaseIdToken ? { firebaseIdToken } : {}),
         }),
         signal: controller.signal,
       });
+      if (!isCurrent()) return;
 
       if (!response.ok) {
         let errMessage = `HTTP ${response.status} from media proxy`;
@@ -126,6 +136,7 @@ export function useDriveStream(options = {}) {
           // Ignore non-JSON error response bodies
         }
 
+        if (!isCurrent()) return;
         if (response.status === 401 || response.status === 403) {
           optionsRef.current.onUnauthorized?.();
         }
@@ -154,6 +165,7 @@ export function useDriveStream(options = {}) {
       setMediaUrl(fullMediaUrl);
       setMetadata({ fileId, expiresAt: data.expiresAt });
       setError(null);
+      return true;
     } catch (err) {
       if (requestGenRef.current !== currentGen || abortControllerRef.current !== controller) {
         return;
@@ -164,6 +176,7 @@ export function useDriveStream(options = {}) {
       } else {
         setError(err.message || 'Failed to prepare video stream');
       }
+      return false;
     } finally {
       if (requestGenRef.current === currentGen && abortControllerRef.current === controller) {
         abortControllerRef.current = null;

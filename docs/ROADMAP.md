@@ -1,5 +1,20 @@
 # Watch Party — Roadmap
 
+## Current implementation checkpoint - 2026-10-26
+
+The milestone plan below is historical. Current implementation and release
+evidence are recorded in [Phase 8 status](PHASE8_STATUS.md).
+
+- Web playback improvements, browser-local continue watching/history/wishlist,
+  avatar colours and typing notices are released at https://partyapp-fun.netlify.app.
+  See [Web product QA](WEB_PRODUCT_QA.md) for production verification and limits.
+- Voice, fullscreen chat and Android screen-video broadcasting were delivered
+  in earlier phases. Android companion development is currently on hold.
+- Remaining release and platform work includes TURN, long-session/device testing,
+  real Drive movie verification, iPhone broadcasting and production packaging.
+- Content discovery, rights-cleared uploads/shared libraries and further
+  accessibility/operations improvements remain future roadmap items.
+
 ## Completed
 
 ### Milestone 1
@@ -29,7 +44,7 @@
 - Event-based pause persistence remains
 - Completed and reviewed
 
-## Current
+## Historical architecture planning checkpoint
 
 ### Milestone 4B
 **Playback synchronization architecture**

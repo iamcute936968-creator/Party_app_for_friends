@@ -37,11 +37,14 @@ function deriveState(video) {
  * @param {string}           blobUrl  ObjectURL for the video (e.g. blob:http://...)
  * @returns {Object}                  MediaAdapter instance
  */
-export function createHTML5Adapter(videoEl, blobUrl) {
+export function createHTML5Adapter(videoEl, blobUrl, { manageSource = true, handleErrors = true } = {}) {
   let readyCb = null;
   let stateChangeCb = null;
   let errorCb = null;
+  let bufferingCb = null;
+  let buffering = false;
   let destroyed = false;
+  let unsupportedVideo = false;
   // Guard against emitting PAUSED while a seek is in progress or the video
   // is transitioning to ENDED (HTMLVideoElement fires 'pause' → 'ended').
   let seekInProgress = false;
@@ -54,11 +57,20 @@ export function createHTML5Adapter(videoEl, blobUrl) {
 
   function onLoadedMetadata() {
     if (destroyed) return;
+    if (handleErrors && videoEl.readyState >= 1 && Number.isFinite(videoEl.duration) && videoEl.duration > 0 && videoEl.videoWidth === 0 && videoEl.videoHeight === 0) {
+      unsupportedVideo = true;
+      try { videoEl.pause(); } catch { /* Error feedback remains available. */ }
+      errorCb?.({ code: 4 });
+      return;
+    }
+    unsupportedVideo = false;
     readyCb?.();
   }
 
   function onPlaying() {
     if (destroyed) return;
+    if (unsupportedVideo) { try { videoEl.pause(); } catch { /* Keep decode feedback. */ } return; }
+    onCanPlay();
     seekInProgress = false;
     endingInProgress = false;
     stateChangeCb?.('PLAYING');
@@ -66,6 +78,9 @@ export function createHTML5Adapter(videoEl, blobUrl) {
 
   function onPause() {
     if (destroyed) return;
+    if (unsupportedVideo) return;
+    // An external engine unloads the failed source before attaching its replacement.
+    if (!manageSource && (videoEl.error || videoEl.readyState === 0)) return;
     // Suppress seek-induced pause events and the pause that precedes 'ended'.
     if (seekInProgress || endingInProgress) return;
     stateChangeCb?.('PAUSED');
@@ -89,6 +104,14 @@ export function createHTML5Adapter(videoEl, blobUrl) {
     if (destroyed) return;
     errorCb?.(videoEl.error);
   }
+  function onWaiting() {
+    if (destroyed || buffering || videoEl.paused || videoEl.readyState >= 3) return;
+    buffering = true; bufferingCb?.(true);
+  }
+  function onCanPlay() {
+    if (destroyed || !buffering) return;
+    buffering = false; bufferingCb?.(false);
+  }
 
   // Register all listeners on the element.
   videoEl.addEventListener('loadedmetadata', onLoadedMetadata);
@@ -97,11 +120,13 @@ export function createHTML5Adapter(videoEl, blobUrl) {
   videoEl.addEventListener('ended', onEnded);
   videoEl.addEventListener('seeking', onSeeking);
   videoEl.addEventListener('seeked', onSeeked);
-  videoEl.addEventListener('error', onError);
+  if (handleErrors) videoEl.addEventListener('error', onError);
+  videoEl.addEventListener('waiting', onWaiting);
+  videoEl.addEventListener('stalled', onWaiting);
+  videoEl.addEventListener('canplay', onCanPlay);
 
   // Assign the blob URL and begin loading.
-  videoEl.src = blobUrl;
-  videoEl.load();
+  if (manageSource) { videoEl.src = blobUrl; videoEl.load(); }
 
   // ------------------------------------------------------------------
   // Public adapter
@@ -118,6 +143,7 @@ export function createHTML5Adapter(videoEl, blobUrl) {
     },
 
     getState() {
+      if (unsupportedVideo) return 'UNSTARTED';
       return deriveState(videoEl);
     },
 
@@ -130,6 +156,7 @@ export function createHTML5Adapter(videoEl, blobUrl) {
      */
     play() {
       if (!videoEl) return Promise.reject(new Error('No video element'));
+      if (unsupportedVideo) return Promise.reject(new Error('No supported video track in this browser.'));
       return videoEl.play();
     },
 
@@ -142,6 +169,9 @@ export function createHTML5Adapter(videoEl, blobUrl) {
       // Guard: only seek if metadata is available.
       if (videoEl.readyState < 1) return;
       videoEl.currentTime = time;
+    },
+    setPlaybackRate(rate) {
+      if (!destroyed && Number.isFinite(rate) && rate >= 0.97 && rate <= 1.03) videoEl.playbackRate = rate;
     },
 
     // Lifecycle
@@ -157,26 +187,31 @@ export function createHTML5Adapter(videoEl, blobUrl) {
       videoEl.removeEventListener('seeking', onSeeking);
       videoEl.removeEventListener('seeked', onSeeked);
       videoEl.removeEventListener('error', onError);
+      videoEl.removeEventListener('waiting', onWaiting);
+      videoEl.removeEventListener('stalled', onWaiting);
+      videoEl.removeEventListener('canplay', onCanPlay);
+      videoEl.playbackRate = 1;
 
       // Stop playback, release media resource.
       try { videoEl.pause(); } catch { /* swallow */ }
-      videoEl.removeAttribute('src');
-      videoEl.load(); // Releases media resource per HTML spec.
+      if (manageSource) { videoEl.removeAttribute('src'); videoEl.load(); }
 
       // Revoke the ObjectURL to free the Blob's memory.
-      if (revokeObjectUrl && blobUrl) {
+      if (manageSource && revokeObjectUrl && blobUrl) {
         try { URL.revokeObjectURL(blobUrl); } catch { /* swallow */ }
       }
 
       readyCb = null;
       stateChangeCb = null;
       errorCb = null;
+      bufferingCb = null;
     },
 
     // Event registration
     onReady(cb) { readyCb = cb; },
     onStateChange(cb) { stateChangeCb = cb; },
     onError(cb) { errorCb = cb; },
+    onBufferingChange(cb) { bufferingCb = cb; },
 
     // Expose for callers that need to know the ending-guard state.
     _setEndingInProgress(v) { endingInProgress = v; },

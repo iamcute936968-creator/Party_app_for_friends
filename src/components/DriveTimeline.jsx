@@ -32,6 +32,7 @@ const NAV_KEYS = new Set([
  */
 const DriveTimeline = React.memo(function DriveTimeline({
   driveVideoRef,
+  mediaAdapter,
   isHost,
   onSeekStart,
   onSeekCommit,
@@ -58,7 +59,7 @@ const DriveTimeline = React.memo(function DriveTimeline({
     let lastUpdate = 0;
 
     const tick = (timestamp) => {
-      const video = driveVideoRef?.current;
+      const video = mediaAdapter ? { currentTime: mediaAdapter.getCurrentTime(), duration: mediaAdapter.getDuration() } : driveVideoRef?.current;
       if (video) {
         if (timestamp - lastUpdate > 250) {
           lastUpdate = timestamp;
@@ -76,7 +77,7 @@ const DriveTimeline = React.memo(function DriveTimeline({
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [driveVideoRef]);
+  }, [driveVideoRef, mediaAdapter]);
 
   // Cleanup document pointer listeners on unmount.
   useEffect(() => {
@@ -118,7 +119,7 @@ const DriveTimeline = React.memo(function DriveTimeline({
   // Uses document-level pointerup/pointercancel to reliably detect
   // release even if the pointer leaves the slider element.
   // ------------------------------------------------------------------
-  const handlePointerDown = useCallback((e) => {
+  const handlePointerDown = useCallback(() => {
     if (isDraggingRef.current) return; // already tracking
     isDraggingRef.current = true;
     dragSourceRef.current = 'pointer';
@@ -186,7 +187,7 @@ const DriveTimeline = React.memo(function DriveTimeline({
     : 0;
 
   return (
-    <div className="flex items-center gap-3 px-3 py-2 bg-gray-800/90 select-none"
+    <div className="drive-timeline flex items-center gap-3 px-3 py-2 select-none"
          style={{ minHeight: 36 }}>
       {/* Elapsed time */}
       <span className="text-gray-400 text-xs font-mono w-12 text-right flex-shrink-0">
@@ -220,7 +221,7 @@ const DriveTimeline = React.memo(function DriveTimeline({
             WebkitAppearance: 'none',
             background: isDisabled
               ? '#374151'
-              : `linear-gradient(to right, #a855f7 0%, #a855f7 ${progress}%, #4b5563 ${progress}%, #4b5563 100%)`,
+              : `linear-gradient(to right, var(--accent) 0%, var(--accent) ${progress}%, var(--line) ${progress}%, var(--line) 100%)`,
             borderRadius: 2,
             outline: 'none',
             cursor: isHost && !isDisabled ? 'pointer' : 'default',

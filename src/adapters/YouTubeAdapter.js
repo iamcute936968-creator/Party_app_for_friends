@@ -41,7 +41,11 @@ export function createYouTubeAdapter(containerId, videoId, playerVars = {}) {
   let readyCb = null;
   let stateChangeCb = null;
   let errorCb = null;
+  let autoplayBlockedCb = null;
+  let bufferingCb = null;
+  let buffering = false;
   let destroyed = false;
+  let ready = false;
 
   const adapter = {
     // ------------------------------------------------------------------
@@ -89,6 +93,8 @@ export function createYouTubeAdapter(containerId, videoId, playerVars = {}) {
       readyCb = null;
       stateChangeCb = null;
       errorCb = null;
+      autoplayBlockedCb = null;
+      bufferingCb = null;
       try { ytPlayer?.destroy(); } catch { /* swallow */ }
       ytPlayer = null;
     },
@@ -107,6 +113,8 @@ export function createYouTubeAdapter(containerId, videoId, playerVars = {}) {
     onStateChange(cb) { stateChangeCb = cb; },
 
     onError(cb) { errorCb = cb; },
+    onAutoplayBlocked(cb) { autoplayBlockedCb = cb; },
+    onBufferingChange(cb) { bufferingCb = cb; },
   };
 
   // Create the actual YT.Player.  window.YT must already be ready when this
@@ -125,11 +133,15 @@ export function createYouTubeAdapter(containerId, videoId, playerVars = {}) {
     },
     events: {
       onReady: () => {
-        if (!destroyed) readyCb?.();
+        if (!destroyed) { ready = true; readyCb?.(); }
       },
       onStateChange: (e) => {
-        if (destroyed) return;
+        if (destroyed || !ready) return;
         const stateCode = e.data;
+        if (buffering !== (stateCode === 3)) {
+          buffering = stateCode === 3;
+          bufferingCb?.(buffering);
+        }
         // Only forward ENDED(0), PLAYING(1), PAUSED(2) to the callback.
         if (stateCode !== 0 && stateCode !== 1 && stateCode !== 2) return;
         const stateName = YT_STATE_MAP[stateCode];
@@ -138,6 +150,7 @@ export function createYouTubeAdapter(containerId, videoId, playerVars = {}) {
       onError: (e) => {
         if (!destroyed) errorCb?.(e);
       },
+      onAutoplayBlocked: () => { if (!destroyed) autoplayBlockedCb?.(); },
     },
   });
 
